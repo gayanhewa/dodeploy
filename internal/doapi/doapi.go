@@ -93,15 +93,24 @@ type ReservedIP struct {
 	} `json:"region"`
 }
 
-// Droplets lists every droplet on the account.
+// Droplets lists every droplet on the account, following pagination so a large
+// account is not silently truncated at the first page.
 func (c *Client) Droplets(ctx context.Context) ([]Droplet, error) {
-	var out struct {
-		Droplets []Droplet `json:"droplets"`
+	var all []Droplet
+
+	path := "/droplets?per_page=200"
+	for path != "" {
+		var out struct {
+			Droplets []Droplet `json:"droplets"`
+			pagination
+		}
+		if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.Droplets...)
+		path = nextPath(out.Links.Pages.Next)
 	}
-	if err := c.do(ctx, http.MethodGet, "/droplets?per_page=200", nil, &out); err != nil {
-		return nil, err
-	}
-	return out.Droplets, nil
+	return all, nil
 }
 
 // DropletByName finds a droplet by name, returning ErrNotFound when absent.

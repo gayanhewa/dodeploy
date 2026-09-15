@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/gayanhewa/dodeploy/internal/appspec"
@@ -42,6 +43,8 @@ type Host struct {
 	IP string
 
 	Out io.Writer
+	// In is read for confirmation prompts, so they can be driven in tests.
+	In io.Reader
 }
 
 // New builds a Host from configuration. It performs no network calls, so
@@ -54,7 +57,7 @@ func New(cfg *config.Config, name string, out io.Writer) (*Host, error) {
 	if hc.Region == "" || hc.Size == "" || hc.Image == "" {
 		return nil, fmt.Errorf("host %q needs region, size and image in %s", hostName, cfg.Path())
 	}
-	return &Host{Name: hostName, Config: hc, cfg: cfg, Out: out}, nil
+	return &Host{Name: hostName, Config: hc, cfg: cfg, Out: out, In: os.Stdin}, nil
 }
 
 // Logf prints progress.
@@ -125,6 +128,24 @@ func (h *Host) Resolve(ctx context.Context) error {
 		Identity: h.Config.SSHIdentity,
 	}
 	return nil
+}
+
+// RegionSlug is the region the host's droplet lives in.
+func (h *Host) RegionSlug() string {
+	if h.Droplet == nil {
+		return ""
+	}
+	return h.Droplet.Region.Slug
+}
+
+// CurrentSizeSlug is the droplet's current size.
+func (h *Host) CurrentSizeSlug(ctx context.Context) (string, error) {
+	if h.Droplet == nil {
+		if err := h.Resolve(ctx); err != nil {
+			return "", err
+		}
+	}
+	return h.Droplet.SizeSlug, nil
 }
 
 // AppDir is the app's directory on the host.

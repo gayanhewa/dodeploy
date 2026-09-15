@@ -53,6 +53,10 @@ func main() {
 		err = cmdDeploy(ctx, args)
 	case "status":
 		err = cmdStatus(ctx, args)
+	case "sizes":
+		err = cmdSizes(ctx, args)
+	case "resize":
+		err = cmdResize(ctx, args)
 	case "apps":
 		err = cmdApps(args)
 	case "new":
@@ -87,6 +91,8 @@ Commands:
   provision   Create a host, wait for it to be ready, point DNS at it
   deploy      Build and install an app, then route it
   status      Show a host and the apps on it
+  sizes       List droplet sizes available in a host's region
+  resize      Grow a host's droplet (powers it off; a disk resize is permanent)
   apps        List apps found in the configured search paths
   new         Write a deploy/app.yaml for a new app
   ssh         Open a shell on a host
@@ -252,6 +258,80 @@ func cmdApps(args []string) error {
 		fmt.Printf("%-24s %-34s %-8d %-14s %s\n", s.Name, s.Domain, s.Port, hostName, s.Root)
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// sizes / resize
+// ---------------------------------------------------------------------------
+
+func cmdSizes(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("sizes", flag.ExitOnError)
+	hostName := fs.String("host", "", "host whose region to list sizes for")
+	fs.Parse(args)
+
+	cfg, _, err := load()
+	if err != nil {
+		return err
+	}
+	h, err := host.New(cfg, *hostName, os.Stdout)
+	if err != nil {
+		return err
+	}
+
+	sizes, err := h.AvailableSizes(ctx)
+	if err != nil {
+		return err
+	}
+
+	current, err := h.CurrentSizeSlug(ctx)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("sizes available in %s:\n\n", h.RegionSlug())
+	fmt.Printf("  %-24s %7s %6s %6s %10s  %s\n", "SLUG", "MEMORY", "VCPU", "DISK", "PRICE/MO", "")
+	for _, s := range sizes {
+		marker := ""
+		switch {
+		case s.Slug == current:
+			marker = "<- current"
+		case s.Disk > 0:
+			marker = "grows the disk permanently"
+		}
+		fmt.Printf("  %-24s %5dMB %6d %5dGB %9.2f  %s\n", s.Slug, s.Memory, s.VCPUs, s.Disk, s.PriceMonthly, marker)
+	}
+	fmt.Printf("\n  resize with: dodeploy resize --size <slug> --disk\n")
+	return nil
+}
+
+func cmdResize(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("resize", flag.ExitOnError)
+	var (
+		hostName = fs.String("host", "", "host to resize")
+		size     = fs.String("size", "", "target size slug (see `dodeploy sizes`)")
+		disk     = fs.Bool("disk", false, "also grow the disk; permanent, cannot be undone")
+		snapshot = fs.Bool("snapshot", true, "capture a snapshot first (billed monthly until deleted)")
+		yes      = fs.Bool("yes", false, "skip the confirmation prompt")
+		timeout  = fs.Duration("timeout", 15*time.Minute, "how long to wait for each step")
+	)
+	fs.Parse(args)
+
+	cfg, _, err := load()
+	if err != nil {
+		return err
+	}
+	h, err := host.New(cfg, *hostName, os.Stdout)
+	if err != nil {
+		return err
+	}
+
+	return h.Resize(ctx, host.ResizeOptions{
+		Size:      *size,
+		Disk:      *disk,
+		Snapshot:  *snapshot,
+		AssumeYes: *yes,
+		Timeout:   *timeout,
+	})
 }
 
 // ---------------------------------------------------------------------------
