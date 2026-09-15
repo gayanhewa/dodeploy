@@ -102,42 +102,6 @@ Every command is idempotent. `provision` reuses an existing droplet and reserved
 IP and reconciles DNS rather than duplicating it; `deploy` skips the proxy reload
 when the generated configuration is unchanged.
 
-## Design notes
-
-Things that were learned the hard way, kept here so they are not relearned.
-
-**Builds happen on the host.** A binary linking libsql needs cgo and its prebuilt
-native libraries must match the target exactly. Cross-compiling from a laptop
-fails in ways that are hard to diagnose: zig cannot resolve the Rust unwinder
-symbols in `libsql_experimental.a`, and nix's cross toolchain emits a binary whose
-ELF interpreter points into the nix store and which wants a newer glibc than the
-target ships.
-
-**DNS reconciliation removes shadowing records.** A new domain at a registrar
-usually ships an `ALIAS` on the apex and a wildcard `CNAME` pointing at parking.
-Either will keep answering instead of the droplet while everything appears
-correctly configured, so `EnsureA` deletes both. NS records are never touched.
-
-**Reserved IPs are preferred over the anchor address.** A droplet with a reserved
-IP attached has two public IPv4s and the API lists the anchor first. The anchor is
-also the address that changes if the droplet is rebuilt, which is the entire
-point of reserving one.
-
-**The cloud-init template is checked for non-ASCII bytes** before a droplet is
-created. cloud-init discards its whole configuration on encountering one, and
-does so silently: the host boots with nothing installed and no error logged. A
-single em-dash in a comment cost a full provisioning cycle.
-
-**Proxy configuration is validated before reload.** An invalid Caddyfile would
-otherwise take every app on the host down at once.
-
-**State lives outside the synced source.** `deploy` uses `rsync --delete`, so
-anything under the application's source directory is destroyed on the next
-deploy. Databases and uploads belong in `data/`.
-
-**The `.env` file is written once and never again.** Secrets are added there by
-hand; overwriting it on each deploy would silently destroy them.
-
 ## Tests
 
 ```bash
@@ -148,3 +112,7 @@ The DNS and proxy tests cover the parts with real subtlety: parking records that
 shadow a new A record, the fully-qualified/short name asymmetry between the
 registrar's read and write APIs, idempotent updates, and proxy output that is
 stable regardless of input order so reloads can be skipped.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
