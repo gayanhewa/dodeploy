@@ -1,0 +1,46 @@
+# Copy to ~/.config/dodeploy/config.yaml and edit.
+#
+# This file holds credentials and should be private (chmod 600). Every value can
+# also come from the environment, which is handy on a machine you do not own.
+
+providers:
+  digitalocean:
+    # Leave empty to use $DIGITALOCEAN_TOKEN, or the token doctl already holds.
+    token: ""
+  porkbun:
+    # Leave empty to use $PORKBUN_API_KEY and $PORKBUN_SECRET_KEY.
+    api_key: ""
+    secret_key: ""
+
+# Directories scanned for applications, one level deep:
+#   <path>/<project>/deploy/app.yaml
+app_paths:
+  - ~/Workspace
+
+hosts:
+  # The key is the droplet name.
+  apps-prod:
+    region: syd1
+    size: s-1vcpu-512mb-10gb
+    image: ubuntu-24-04-x64
+
+    # A reserved IP survives destroying and recreating the droplet. Without one,
+    # DNS points at the anchor address, which changes on a rebuild.
+    reserved_ip: true
+
+    # DigitalOcean's agent, for the web console's graphs.
+    monitoring: true
+
+    # Names, ids or fingerprints. Empty means every key on the account.
+    # doctl --ssh-keys only accepts ids and fingerprints, so names are resolved.
+    ssh_keys: []
+
+    # Private key this tool uses for its own ssh and rsync connections. If it is
+    # not one of ssh's default identities, it must be set here or every
+    # connection fails with "Permission denied (publickey)".
+    ssh_identity: ~/.ssh/dodeploy
+
+    # Used for the Let's Encrypt account.
+    caddy_email: admin@example.com
+
+    default: true

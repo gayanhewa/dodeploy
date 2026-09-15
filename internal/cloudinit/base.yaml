@@ -1,0 +1,114 @@
+#cloud-config
+# First-boot setup for a dodeploy host.
+#
+# One Caddy reverse proxy owns ports 80 and 443; every app runs as its own
+# systemd service on a loopback port. Apps never bind a public interface, so
+# adding one is a configuration change rather than a firewall change.
+#
+# NOTE: this file must be plain ASCII. cloud-init discards its entire
+# configuration when it meets a non-ASCII byte, and does so silently: the host
+# boots clean with nothing installed and no error anywhere. dodeploy checks for
+# this before creating a droplet.
+
+package_update: true
+package_upgrade: true
+
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - git
+  - rsync
+  - ufw
+  - unattended-upgrades
+  - apt-transport-https
+  - debian-keyring
+  - debian-archive-keyring
+  - build-essential
+
+users:
+  # Runs the apps. No shell, no password: services only.
+  - name: apps
+    system: true
+    shell: /usr/sbin/nologin
+    lock_passwd: true
+  # Deployer account. Inherits root's authorised keys below, so the droplet can
+  # be created with -ssh-keys and no keys need pasting into this file.
+  - name: deploy
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: ALL=(ALL) NOPASSWD:ALL
+
+write_files:
+  - path: /etc/sysctl.d/99-small-host.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      fs.inotify.max_user_instances = 512
+      net.core.somaxconn = 1024
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root:root
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+runcmd:
+  - mkdir -p /srv/apps
+  - chown apps:apps /srv/apps
+  - chmod 755 /srv/apps
+
+  # The droplet is created with ssh keys, which only seeds root.
+  - mkdir -p /home/deploy/.ssh
+  - cp /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys || true
+  - chown -R deploy:deploy /home/deploy/.ssh
+  - chmod 700 /home/deploy/.ssh
+  - chmod 600 /home/deploy/.ssh/authorized_keys || true
+
+  # Swap matters on a 512MB host: a cgo build can exceed the RAM available.
+  - fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  - sysctl -w vm.swappiness=10
+
+  - ufw allow 22/tcp
+  - ufw allow 80/tcp
+  - ufw allow 443/tcp
+  - ufw --force enable
+
+  # Caddy, for automatic TLS.
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+  - curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' > /etc/apt/sources.list.d/caddy-stable.list
+  - apt-get update -qq
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq caddy
+  # The package is supposed to create its own service account, but its postinst
+  # no-ops in a non-interactive cloud-init run and caddy then fails with
+  # status=217/USER. Creating it explicitly is cheap insurance.
+  - id -u caddy >/dev/null 2>&1 || useradd --system --home-dir /var/lib/caddy --create-home --shell /usr/sbin/nologin caddy
+  - mkdir -p /var/lib/caddy /etc/caddy
+  - chown -R caddy:caddy /var/lib/caddy
+  # --now matters: enabling alone leaves caddy inactive until the next reboot.
+  - systemctl enable --now caddy
+
+  # Go toolchain. Builds happen on the host because a cgo binary has to match
+  # the target's libc, and cross-compiling libsql's prebuilt native libraries is
+  # unreliable.
+  - curl -fsSL https://go.dev/dl/go1.26.0.linux-amd64.tar.gz -o /tmp/go.tgz
+  - tar -C /usr/local -xzf /tmp/go.tgz
+  - rm -f /tmp/go.tgz
+  - echo 'export PATH=$PATH:/usr/local/go/bin' > /etc/profile.d/go.sh
+  - chmod 644 /etc/profile.d/go.sh
+
+  - mkdir -p /home/apps/go /home/apps/.cache
+  - chown -R apps:apps /home/apps
+
+  - sysctl --system
+
+  # Readiness marker: the tool waits for this rather than guessing how long apt,
+  # the Go download and the swapfile take.
+  - touch /srv/apps/.provisioned
+  - chown deploy:deploy /srv/apps/.provisioned
+
+final_message: "dodeploy host ready after $UPTIME seconds."
