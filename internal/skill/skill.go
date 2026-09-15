@@ -24,6 +24,16 @@ const Name = "dodeploy"
 // source is the skill's directory in the embedded filesystem.
 const source = "skills/" + Name
 
+// markerName is written next to SKILL.md so a later version of this tool
+// recognises its own installation and may upgrade it without --force. A skill
+// without the marker was put there by something else and is never overwritten
+// by accident.
+const markerName = ".dodeploy-managed"
+
+const markerBody = "This skill is managed by `dodeploy skills install`.\n" +
+	"To change it, edit skills/" + Name + "/SKILL.md in the dodeploy repository\n" +
+	"and reinstall, rather than editing the copy here.\n"
+
 // Target is a place the skill can be installed for a coding assistant.
 type Target struct {
 	// Label names the convention being served, for output.
@@ -91,9 +101,11 @@ type Installation struct {
 // Install writes the embedded skill into each target.
 //
 // An existing, identical installation is reported as up to date rather than
-// rewritten, matching the idempotence of the rest of the tool. A target with
-// different content is left alone unless force is set, so an unrelated skill of
-// the same name is never clobbered by accident.
+// rewritten, matching the idempotence of the rest of the tool. A directory this
+// tool previously installed (it carries a marker) is upgraded in place, so a new
+// binary refreshes its own skill. Anything else with different content is left
+// alone unless force is set, so an unrelated skill of the same name is never
+// clobbered.
 func Install(targets []Target, force bool) ([]Installation, error) {
 	content, err := files()
 	if err != nil {
@@ -102,25 +114,43 @@ func Install(targets []Target, force bool) ([]Installation, error) {
 
 	results := make([]Installation, 0, len(targets))
 	for _, t := range targets {
-		existing, err := os.ReadFile(filepath.Join(t.Dir, "SKILL.md"))
+		same, err := isCurrent(t.Dir, content["SKILL.md"])
 		switch {
-		case err == nil && !force:
-			if bytes.Equal(existing, content["SKILL.md"]) {
-				results = append(results, Installation{Target: t, Status: UpToDate})
-				continue
-			}
-			results = append(results, Installation{Target: t, Status: Skipped})
-			continue
 		case err != nil && !errors.Is(err, fs.ErrNotExist):
 			return results, fmt.Errorf("read %s: %w", t.Dir, err)
+		case same && !force:
+			results = append(results, Installation{Target: t, Status: UpToDate})
+			continue
+		case err == nil && !force && !isManaged(t.Dir):
+			// A different skill of the same name: leave it for --force.
+			results = append(results, Installation{Target: t, Status: Skipped})
+			continue
 		}
 
 		if err := writeAll(t.Dir, content); err != nil {
 			return results, err
 		}
+		if err := os.WriteFile(filepath.Join(t.Dir, markerName), []byte(markerBody), 0o644); err != nil {
+			return results, fmt.Errorf("write marker: %w", err)
+		}
 		results = append(results, Installation{Target: t, Status: Installed, Files: len(content)})
 	}
 	return results, nil
+}
+
+// isCurrent reports whether dir already holds exactly this SKILL.md.
+func isCurrent(dir string, want []byte) (bool, error) {
+	got, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		return false, err
+	}
+	return bytes.Equal(got, want), nil
+}
+
+// isManaged reports whether this tool installed the skill at dir.
+func isManaged(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, markerName))
+	return err == nil
 }
 
 // Content returns the skill's files, keyed by their path relative to the skill

@@ -85,6 +85,29 @@ env:                     # non-secret defaults, written once
 The spec lives with the app rather than in a central registry, so nothing has to
 be kept in step.
 
+## Monitoring
+
+`dodeploy health` takes a snapshot of a host: CPU, load, memory, swap, disk and
+the state of every app on it. It reads `/proc` and `df` over ssh, so a droplet
+needs no agent installed.
+
+```bash
+dodeploy health                  # one snapshot
+dodeploy health --app my-app     # one app
+dodeploy health --json           # for a dashboard or log
+dodeploy health --watch 5s       # refresh until interrupted
+```
+
+Anything over a threshold is flagged. The thresholds are percentages and default
+to 90, and can be changed or disabled (0):
+
+```bash
+dodeploy health --cpu 80 --mem 85 --disk 90
+```
+
+The exit code makes it usable from a monitor: **0** healthy, **2** degraded (a
+threshold crossed or an app unhealthy), **1** the check itself failed.
+
 ## Commands
 
 ```bash
@@ -94,6 +117,7 @@ dodeploy provision                                        # create the host + DN
 dodeploy deploy ~/Workspace/my-app                        # build and install
 dodeploy deploy --all                                     # everything found
 dodeploy status                                           # hosts and health
+dodeploy health --watch 5s                                # cpu, memory, disk, apps
 dodeploy logs my-app                                      # follow the journal
 dodeploy ssh                                              # shell on the host
 dodeploy skills install --global                          # teach your AI agent

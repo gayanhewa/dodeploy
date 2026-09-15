@@ -53,12 +53,25 @@ func (h *Host) Status(ctx context.Context, specs []*appspec.Spec) error {
 
 	fmt.Fprintln(h.Out)
 	fmt.Fprintf(h.Out, "  %-22s %-34s %-8s %-10s %s\n", "APP", "DOMAIN", "PORT", "UNIT", "HEALTH")
+	for _, st := range h.appStatuses(ctx, apps, sshOK) {
+		printStatus(h, st)
+	}
+	return nil
+}
+
+// appStatuses probes each app: whether its unit exists and is active, and
+// whether it answers its health path on loopback.
+//
+// The health check runs on the host against 127.0.0.1, so a failure points at
+// the app rather than at DNS or TLS.
+func (h *Host) appStatuses(ctx context.Context, apps []*appspec.Spec, sshOK bool) []AppStatus {
+	out := make([]AppStatus, 0, len(apps))
 	for _, spec := range apps {
 		st := AppStatus{Name: spec.Name, Domain: spec.Domain, Port: spec.Port}
 
 		if !sshOK {
 			st.Unit = "unknown"
-			printStatus(h, st)
+			out = append(out, st)
 			continue
 		}
 
@@ -66,7 +79,7 @@ func (h *Host) Status(ctx context.Context, specs []*appspec.Spec) error {
 		if !h.Remote.RunTolerant(ctx, "systemctl list-unit-files --quiet "+unit+".service >/dev/null 2>&1 || systemctl status "+unit+" >/dev/null 2>&1") {
 			st.NotDeployed = true
 			st.Unit = "-"
-			printStatus(h, st)
+			out = append(out, st)
 			continue
 		}
 
@@ -78,9 +91,9 @@ func (h *Host) Status(ctx context.Context, specs []*appspec.Spec) error {
 		st.Healthy = h.Remote.RunTolerant(ctx, fmt.Sprintf(
 			"curl -fsS --max-time 5 %s >/dev/null 2>&1",
 			quote(fmt.Sprintf("http://127.0.0.1:%d%s", spec.Port, spec.Health))))
-		printStatus(h, st)
+		out = append(out, st)
 	}
-	return nil
+	return out
 }
 
 func printStatus(h *Host, st AppStatus) {

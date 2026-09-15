@@ -130,6 +130,15 @@ func (h *Host) Resolve(ctx context.Context) error {
 	return nil
 }
 
+// ensureResolved resolves the droplet unless it already has, so a command that
+// samples in a loop pays for the lookup once rather than on every tick.
+func (h *Host) ensureResolved(ctx context.Context) error {
+	if h.Droplet != nil && h.IP != "" {
+		return nil
+	}
+	return h.Resolve(ctx)
+}
+
 // RegionSlug is the region the host's droplet lives in.
 func (h *Host) RegionSlug() string {
 	if h.Droplet == nil {

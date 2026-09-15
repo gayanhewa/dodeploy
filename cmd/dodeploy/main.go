@@ -13,11 +13,14 @@
 //	dodeploy new       <name> <domain> [--dir DIR] [--host NAME] [--port N]
 //	dodeploy ssh       [--host NAME]
 //	dodeploy logs      <name> [--lines N]
+//	dodeploy health    [--host NAME] [--app NAME] [--watch 5s] [--json]
 //	dodeploy skills    install [--global] [--dir DIR] [--force]
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -55,6 +58,8 @@ func main() {
 		err = cmdDeploy(ctx, args)
 	case "status":
 		err = cmdStatus(ctx, args)
+	case "health":
+		err = cmdHealth(ctx, args)
 	case "sizes":
 		err = cmdSizes(ctx, args)
 	case "resize":
@@ -80,6 +85,11 @@ func main() {
 	}
 
 	if err != nil {
+		// Degraded is a result, not a failure: the report has already been
+		// printed, so exit 2 lets a monitor alert without parsing it.
+		if errors.Is(err, host.ErrDegraded) {
+			os.Exit(2)
+		}
 		fmt.Fprintf(os.Stderr, "\nerror: %v\n", err)
 		os.Exit(1)
 	}
@@ -95,6 +105,7 @@ Commands:
   provision   Create a host, wait for it to be ready, point DNS at it
   deploy      Build and install an app, then route it
   status      Show a host and the apps on it
+  health      Sample cpu, memory, disk and app health on a host
   sizes       List droplet sizes available in a host's region
   resize      Grow a host's droplet (powers it off; a disk resize is permanent)
   apps        List apps found in the configured search paths
@@ -239,6 +250,112 @@ func cmdStatus(ctx context.Context, args []string) error {
 		return err
 	}
 	return h.Status(ctx, specs)
+}
+
+// ---------------------------------------------------------------------------
+// health
+// ---------------------------------------------------------------------------
+
+func cmdHealth(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("health", flag.ExitOnError)
+	var (
+		hostName = fs.String("host", "", "host to sample")
+		appName  = fs.String("app", "", "only report this app")
+		asJSON   = fs.Bool("json", false, "emit the snapshot as JSON")
+		watch    = fs.Duration("watch", 0, "sample repeatedly at this interval until interrupted")
+		count    = fs.Int("count", 0, "stop after this many samples (0 means forever)")
+		cpuMax   = fs.Float64("cpu", 90, "degrade above this CPU percentage (0 disables)")
+		memMax   = fs.Float64("mem", 90, "degrade above this memory percentage (0 disables)")
+		diskMax  = fs.Float64("disk", 90, "degrade above this disk percentage (0 disables)")
+	)
+	fs.Parse(args)
+
+	cfg, specs, err := load()
+	if err != nil {
+		return err
+	}
+	if *appName != "" {
+		spec, err := appspec.Find(specs, *appName)
+		if err != nil {
+			return err
+		}
+		specs = []*appspec.Spec{spec}
+	}
+
+	h, err := host.New(cfg, *hostName, os.Stdout)
+	if err != nil {
+		return err
+	}
+	if err := h.Resolve(ctx); err != nil {
+		return err
+	}
+
+	opts := host.HealthOptions{CPUMax: *cpuMax, MemMax: *memMax, DiskMax: *diskMax}
+
+	sample := func() (bool, error) {
+		health, err := h.Health(ctx, specs, opts)
+		if err != nil {
+			return false, err
+		}
+		if *asJSON {
+			encoded, err := json.MarshalIndent(health, "", "  ")
+			if err != nil {
+				return false, err
+			}
+			fmt.Println(string(encoded))
+		} else {
+			h.PrintHealth(health)
+		}
+		return health.Degraded(), nil
+	}
+
+	if *watch <= 0 {
+		degraded, err := sample()
+		if err != nil {
+			return err
+		}
+		if degraded {
+			return host.ErrDegraded
+		}
+		return nil
+	}
+
+	clear := isTerminal(os.Stdout)
+	degraded := false
+	for i := 0; *count == 0 || i < *count; i++ {
+		if i > 0 {
+			select {
+			case <-ctx.Done():
+				return degradedErr(degraded)
+			case <-time.After(*watch):
+			}
+			if clear && !*asJSON {
+				fmt.Fprint(os.Stdout, "\033[2J\033[H")
+			}
+		}
+		degraded, err = sample()
+		if err != nil {
+			return err
+		}
+	}
+	return degradedErr(degraded)
+}
+
+func degradedErr(degraded bool) error {
+	if degraded {
+		return host.ErrDegraded
+	}
+	return nil
+}
+
+// isTerminal reports whether f is a character device, so escape sequences are
+// only written to something that will interpret them.
+func isTerminal(f *os.File) bool {
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 func cmdApps(args []string) error {

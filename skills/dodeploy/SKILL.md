@@ -137,6 +137,7 @@ dodeploy deploy <path> | --name NAME | --all   [--skip-build] [--skip-proxy]
 
 # inspect
 dodeploy status [--host NAME]
+dodeploy health [--host NAME] [--app NAME] [--watch 5s] [--json]
 dodeploy apps
 dodeploy logs <name> [--host NAME] [--lines N] [--follow]
 
@@ -191,6 +192,31 @@ dodeploy new second-app second-app.com --dir ~/Workspace/second-app
 dodeploy deploy ~/Workspace/second-app
 ```
 
+### Monitor a host
+
+```bash
+dodeploy health                      # one snapshot: cpu, memory, disk, apps
+dodeploy health --app my-app         # just one app
+dodeploy health --json               # machine readable, for a dashboard
+dodeploy health --watch 5s           # refresh until interrupted
+```
+
+`health` reads `/proc` and `df` on the host, so a bare droplet needs no agent
+installed. It flags anything above a threshold and any unhealthy app. Three
+thresholds default to 90% and can be changed or disabled with `--cpu`, `--mem`
+and `--disk` (0 disables a check).
+
+Exit codes make it usable from a monitor or cron: **0** healthy, **2** degraded
+(a threshold crossed or an app unhealthy), **1** the check itself failed.
+
+```bash
+# cron: alert when the box is degraded, and say why
+dodeploy health --json > /tmp/health.json || alert < /tmp/health.json
+```
+
+Use `status` when you want to know what is deployed, and `health` when you want
+to know how the machine and its apps are doing right now.
+
 ### Diagnose a failed deploy
 
 ```bash
@@ -225,6 +251,7 @@ deleted. The droplet is powered off during the resize.
 | `no host named "x"` | `host:` in the spec does not match a key under `hosts:`. Check `dodeploy status`. |
 | `Permission denied (publickey)` | `ssh_identity` is unset or wrong, or the key is not among `ssh_keys` on the account. |
 | App unhealthy after deploy | The service did not come up; check `dodeploy logs`. Confirm the app listens on `$PORT`/`127.0.0.1` and serves `health`. |
+| High disk/cpu/memory reported | Confirm with `dodeploy health`; grow the disk with `dodeploy resize --disk` (permanent) or move data off the host. |
 | Port already in use | Two apps share a port on one host. Reassign one (`dodeploy new` picks a free port). |
 | TLS never issues | DNS for the domain does not resolve to the host. Run `dodeploy provision --dns-only`, or `--no-dns` if managing DNS elsewhere. |
 | `no DigitalOcean token` | Set `providers.digitalocean.token`, export `$DIGITALOCEAN_TOKEN`, or run `doctl auth init`. |

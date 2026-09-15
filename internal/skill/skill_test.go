@@ -89,6 +89,43 @@ func TestInstallRefusesToClobberWithoutForce(t *testing.T) {
 	}
 }
 
+func TestInstallUpgradesItsOwnEarlierVersion(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "skills")
+	targets := TargetsIn([]string{dir})
+	if _, err := Install(targets, false); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Simulate a copy left by an older binary: a marker but stale content.
+	path := filepath.Join(dir, Name, "SKILL.md")
+	if err := os.WriteFile(path, []byte("an older version"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := Install(targets, false)
+	if err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+	if results[0].Status != Installed {
+		t.Fatalf("status = %q, want %q (a managed skill should upgrade without --force)", results[0].Status, Installed)
+	}
+	got, _ := os.ReadFile(path)
+	want, _ := Body()
+	if string(got) != string(want) {
+		t.Error("managed skill was not upgraded")
+	}
+}
+
+func TestInstallWritesMarker(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "skills")
+	if _, err := Install(TargetsIn([]string{dir}), false); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, Name, markerName)); err != nil {
+		t.Errorf("marker missing: %v", err)
+	}
+}
+
 func TestTargetsAtUsesBothConventions(t *testing.T) {
 	targets := TargetsAt("/base")
 	if len(targets) != 2 {
