@@ -96,11 +96,29 @@ dodeploy deploy --all                                     # everything found
 dodeploy status                                           # hosts and health
 dodeploy logs my-app                                      # follow the journal
 dodeploy ssh                                              # shell on the host
+dodeploy skills install --global                          # teach your AI agent
 ```
 
 Every command is idempotent. `provision` reuses an existing droplet and reserved
 IP and reconciles DNS rather than duplicating it; `deploy` skips the proxy reload
 when the generated configuration is unchanged.
+
+## Agent skill
+
+The `dodeploy` skill teaches an AI coding assistant the config format, the app
+spec, and the commands above. It is embedded in the binary, so one executable is
+enough to install it.
+
+```bash
+dodeploy skills install              # this project: .agents/skills + .claude/skills
+dodeploy skills install --global     # every project: ~/.agents/skills + ~/.claude/skills
+dodeploy skills install --dir PATH   # an explicit skills directory (repeatable)
+dodeploy skills list                 # where it is installed
+dodeploy skills show                 # print SKILL.md
+```
+
+An existing, identical installation is left alone; one with different content is
+only overwritten with `--force`.
 
 ## Tests
 

@@ -13,6 +13,7 @@
 //	dodeploy new       <name> <domain> [--dir DIR] [--host NAME] [--port N]
 //	dodeploy ssh       [--host NAME]
 //	dodeploy logs      <name> [--lines N]
+//	dodeploy skills    install [--global] [--dir DIR] [--force]
 package main
 
 import (
@@ -30,6 +31,7 @@ import (
 	"github.com/gayanhewa/dodeploy/internal/appspec"
 	"github.com/gayanhewa/dodeploy/internal/config"
 	"github.com/gayanhewa/dodeploy/internal/host"
+	"github.com/gayanhewa/dodeploy/internal/skill"
 )
 
 const version = "0.1.0"
@@ -65,6 +67,8 @@ func main() {
 		err = cmdSSH(ctx, args)
 	case "logs":
 		err = cmdLogs(ctx, args)
+	case "skills":
+		err = cmdSkills(args)
 	case "version", "-v", "--version":
 		fmt.Println("dodeploy", version)
 	case "help", "-h", "--help":
@@ -97,6 +101,7 @@ Commands:
   new         Write a deploy/app.yaml for a new app
   ssh         Open a shell on a host
   logs        Follow an app's logs
+  skills      Install the agent skill that documents this tool
 
 Run "dodeploy <command> -h" for the flags of a command.
 
@@ -507,6 +512,105 @@ func cmdLogs(ctx context.Context, args []string) error {
 		return err
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// skills
+// ---------------------------------------------------------------------------
+
+func cmdSkills(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: dodeploy skills <install|list|show>")
+	}
+	switch args[0] {
+	case "install":
+		return cmdSkillsInstall(args[1:])
+	case "list", "ls":
+		return cmdSkillsList()
+	case "show", "cat":
+		return cmdSkillsShow()
+	default:
+		return fmt.Errorf("unknown skills subcommand %q (want install, list or show)", args[0])
+	}
+}
+
+// stringList collects a flag that may be repeated.
+type stringList []string
+
+func (s *stringList) String() string { return strings.Join(*s, ", ") }
+
+func (s *stringList) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
+func cmdSkillsInstall(args []string) error {
+	fs := flag.NewFlagSet("skills install", flag.ExitOnError)
+	var (
+		global = fs.Bool("global", false, "install for the current user (~) instead of this project")
+		force  = fs.Bool("force", false, "overwrite an existing installation with different content")
+		dirs   stringList
+	)
+	fs.Var(&dirs, "dir", "skills directory to install into, e.g. ~/.agents/skills (repeatable)")
+	fs.Parse(args)
+
+	var targets []skill.Target
+	if len(dirs) > 0 {
+		targets = skill.TargetsIn(dirs)
+	} else {
+		t, err := skill.Targets(*global)
+		if err != nil {
+			return err
+		}
+		targets = t
+	}
+
+	results, err := skill.Install(targets, *force)
+	for _, r := range results {
+		fmt.Printf("%-8s %-52s %s\n", r.Target.Label, r.Target.Dir, r.Status)
+	}
+	if err != nil {
+		return err
+	}
+
+	for _, r := range results {
+		if r.Status == skill.Installed {
+			fmt.Printf("\nThe skill is available to agents that read skills from those directories.\n")
+			break
+		}
+	}
+	return nil
+}
+
+func cmdSkillsList() error {
+	for _, global := range []bool{false, true} {
+		scope := "project"
+		if global {
+			scope = "global"
+		}
+		targets, err := skill.Targets(global)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s:\n", scope)
+		for _, t := range targets {
+			state := "not installed"
+			if _, err := os.Stat(filepath.Join(t.Dir, "SKILL.md")); err == nil {
+				state = "installed"
+			}
+			fmt.Printf("  %-8s %-52s %s\n", t.Label, t.Dir, state)
+		}
+	}
+	return nil
+}
+
+func cmdSkillsShow() error {
+	body, err := skill.Body()
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write(body)
+	return err
 }
 
 // ---------------------------------------------------------------------------
