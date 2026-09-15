@@ -316,7 +316,7 @@ func cmdResize(ctx context.Context, args []string) error {
 	)
 	fs.Parse(args)
 
-	cfg, _, err := load()
+	cfg, specs, err := load()
 	if err != nil {
 		return err
 	}
@@ -331,6 +331,7 @@ func cmdResize(ctx context.Context, args []string) error {
 		Snapshot:  *snapshot,
 		AssumeYes: *yes,
 		Timeout:   *timeout,
+		Specs:     specs,
 	})
 }
 

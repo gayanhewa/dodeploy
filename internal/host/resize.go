@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gayanhewa/dodeploy/internal/appspec"
 	"github.com/gayanhewa/dodeploy/internal/doapi"
 )
 
@@ -24,6 +25,9 @@ type ResizeOptions struct {
 	AssumeYes bool
 	// Timeout bounds each individual wait.
 	Timeout time.Duration
+	// Specs are the apps known to the caller, so the post-resize report can show
+	// whether they came back rather than just the host.
+	Specs []*appspec.Spec
 }
 
 // Resize changes the host's droplet size.
@@ -121,7 +125,7 @@ func (h *Host) Resize(ctx context.Context, opts ResizeOptions) error {
 
 	fmt.Fprintln(h.Out)
 	h.Logf("checking the apps came back")
-	return h.Status(ctx, nil)
+	return h.Status(ctx, opts.Specs)
 }
 
 // runAction issues a droplet action and waits for it.
