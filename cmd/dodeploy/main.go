@@ -33,6 +33,7 @@ import (
 
 	"github.com/gayanhewa/dodeploy/internal/appspec"
 	"github.com/gayanhewa/dodeploy/internal/config"
+	"github.com/gayanhewa/dodeploy/internal/dns"
 	"github.com/gayanhewa/dodeploy/internal/host"
 	"github.com/gayanhewa/dodeploy/internal/skill"
 )
@@ -64,6 +65,8 @@ func main() {
 		err = cmdSizes(ctx, args)
 	case "resize":
 		err = cmdResize(ctx, args)
+	case "dns":
+		err = cmdDNS(ctx, args)
 	case "apps":
 		err = cmdApps(args)
 	case "new":
@@ -108,6 +111,7 @@ Commands:
   health      Sample cpu, memory, disk and app health on a host
   sizes       List droplet sizes available in a host's region
   resize      Grow a host's droplet (powers it off; a disk resize is permanent)
+  dns         Show a domain's records, or add a TXT record
   apps        List apps found in the configured search paths
   new         Write a deploy/app.yaml for a new app
   ssh         Open a shell on a host
@@ -455,6 +459,68 @@ func cmdResize(ctx context.Context, args []string) error {
 		Timeout:   *timeout,
 		Specs:     specs,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// dns
+// ---------------------------------------------------------------------------
+
+func cmdDNS(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage:\n" +
+			"  dodeploy dns show <domain>\n" +
+			"  dodeploy dns txt <name> <value>")
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	apiKey, secret, err := cfg.PorkbunCreds()
+	if err != nil {
+		return err
+	}
+	provider := dns.NewPorkbun(apiKey, secret)
+
+	switch args[0] {
+	case "show":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: dodeploy dns show <domain>")
+		}
+		records, err := provider.Records(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		dns.SortRecords(records)
+
+		fmt.Printf("records for %s:\n\n", args[1])
+		fmt.Printf("  %-8s %-38s %s\n", "TYPE", "NAME", "CONTENT")
+		for _, r := range records {
+			if r.Type == "NS" {
+				continue // nameservers are noise for most lookups
+			}
+			content := r.Content
+			if len(content) > 58 {
+				content = content[:55] + "..."
+			}
+			fmt.Printf("  %-8s %-38s %s\n", r.Type, r.Name, content)
+		}
+		return nil
+
+	case "txt":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: dodeploy dns txt <name> <value>")
+		}
+		result, err := dns.EnsureTXT(ctx, provider, args[1], args[2], "600")
+		if err != nil {
+			return err // ErrNotOptedIn already reads as an instruction
+		}
+		fmt.Println(result)
+		return nil
+
+	default:
+		return fmt.Errorf("unknown dns subcommand %q; use show or txt", args[0])
+	}
 }
 
 // ---------------------------------------------------------------------------

@@ -32,25 +32,26 @@ type Provider interface {
 	Delete(ctx context.Context, hostname string, id string) error
 }
 
-// Result describes what reconciling one hostname changed.
+// Result describes what reconciling one record changed.
 type Result struct {
-	Hostname  string
-	IP        string
+	Hostname string
+	// Value is the address for an A record, or the content for a TXT record.
+	Value     string
 	Created   bool
 	Updated   bool
 	Unchanged bool
-	Removed   []string // records deleted because they would shadow the A record
+	Removed   []string // records deleted because they would shadow the record
 }
 
 // String renders the outcome for a log line.
 func (r Result) String() string {
 	switch {
 	case r.Unchanged:
-		return fmt.Sprintf("%s already points at %s", r.Hostname, r.IP)
+		return fmt.Sprintf("%s already correct", r.Hostname)
 	case r.Created:
-		return fmt.Sprintf("created %s -> %s", r.Hostname, r.IP)
+		return fmt.Sprintf("created %s -> %s", r.Hostname, r.Value)
 	case r.Updated:
-		return fmt.Sprintf("updated %s -> %s", r.Hostname, r.IP)
+		return fmt.Sprintf("updated %s -> %s", r.Hostname, r.Value)
 	default:
 		return fmt.Sprintf("%s left alone", r.Hostname)
 	}
@@ -65,7 +66,7 @@ func (r Result) String() string {
 //
 // NS records are never touched.
 func EnsureA(ctx context.Context, p Provider, hostname, ip, ttl string) (Result, error) {
-	res := Result{Hostname: hostname, IP: ip}
+	res := Result{Hostname: hostname, Value: ip}
 	if ttl == "" {
 		ttl = "600"
 	}
@@ -105,6 +106,47 @@ func EnsureA(ctx context.Context, p Provider, hostname, ip, ttl string) (Result,
 
 	if err := p.Create(ctx, hostname, Record{Type: "A", Name: hostname, Content: ip, TTL: ttl}); err != nil {
 		return res, fmt.Errorf("create %s: %w", hostname, err)
+	}
+	res.Created = true
+	return res, nil
+}
+
+// EnsureTXT adds a TXT record, leaving every other record in place.
+//
+// This is deliberately not a mirror of EnsureA. Several TXT records legitimately
+// share one name: SPF, DKIM, and a domain verification token commonly sit on the
+// same apex. Replacing the name's contents the way a conflicting CNAME is
+// replaced would silently break email authentication, so this only adds the
+// record when the same value is not already present.
+func EnsureTXT(ctx context.Context, p Provider, hostname, value, ttl string) (Result, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return Result{}, fmt.Errorf("a TXT value is required")
+	}
+	if ttl == "" {
+		ttl = "600"
+	}
+
+	res := Result{Hostname: hostname, Value: value}
+
+	records, err := p.Records(ctx, hostname)
+	if err != nil {
+		return res, err
+	}
+
+	for _, r := range records {
+		if !strings.EqualFold(r.Type, "TXT") || !sameName(r.Name, hostname) {
+			continue
+		}
+		if strings.TrimSpace(r.Content) == value {
+			res.Unchanged = true
+			return res, nil
+		}
+	}
+
+	err = p.Create(ctx, hostname, Record{Type: "TXT", Name: hostname, Content: value, TTL: ttl})
+	if err != nil {
+		return res, fmt.Errorf("create TXT on %s: %w", hostname, err)
 	}
 	res.Created = true
 	return res, nil
