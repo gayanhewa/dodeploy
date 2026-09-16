@@ -1,0 +1,10 @@
+{
+  "name": "docker-example",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hello world Node.js app, packaged as an Alpine container.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

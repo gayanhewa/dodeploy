@@ -167,9 +167,10 @@ func sites(specs []*appspec.Spec) []caddy.Site {
 	out := make([]caddy.Site, 0, len(specs))
 	for _, s := range specs {
 		out = append(out, caddy.Site{
-			Domain:  s.Domain,
-			Aliases: caddy.WithWWW(s.Domain, s.Aliases),
-			Port:    s.Port,
+			Domain:      s.Domain,
+			Aliases:     caddy.WithWWW(s.Domain, s.Aliases),
+			Port:        s.Port,
+			TLSInternal: s.TLS == "internal",
 		})
 	}
 	return out

@@ -1,0 +1,13 @@
+# Keep the build context small: the image only needs the manifest and the
+# server. Anything here is neither copied into the image nor hashed into the
+# layer cache, so a change to it does not trigger a rebuild.
+.git
+.gitignore
+node_modules
+npm-debug.log
+Dockerfile
+.dockerignore
+README.md
+deploy/
+data/
+static/

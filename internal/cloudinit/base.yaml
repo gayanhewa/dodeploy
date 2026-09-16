@@ -92,6 +92,21 @@ runcmd:
   # --now matters: enabling alone leaves caddy inactive until the next reboot.
   - systemctl enable --now caddy
 
+  # Docker, for container apps. The daemon runs the container; dodeploy only
+  # builds the image on the host and asks it to run one. A container app is
+  # still a systemd unit, so it is supervised the same way a binary app is.
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - |
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update -qq
+  - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+  - systemctl enable --now docker
+  # The deployer builds images, so it needs the daemon socket. It already has
+  # passwordless sudo, so this grants nothing it could not already take.
+  - usermod -aG docker deploy || true
+
   # Go toolchain. Builds happen on the host because a cgo binary has to match
   # the target's libc, and cross-compiling libsql's prebuilt native libraries is
   # unreliable.

@@ -37,8 +37,16 @@ type Spec struct {
 	Port int `yaml:"port"`
 	// Health is the path used to check the app came up, e.g. /healthz.
 	Health string `yaml:"health"`
+	// Runtime is how the app is packaged: RuntimeBinary (the default) or
+	// RuntimeDocker. Empty means binary.
+	Runtime string `yaml:"runtime"`
+	// TLS selects the certificate source. Empty lets Caddy use ACME, which
+	// needs a publicly resolvable name. "internal" uses Caddy's own CA, which
+	// is what a name behind a local hosts entry needs.
+	TLS string `yaml:"tls"`
 
 	Build  Build  `yaml:"build"`
+	Docker Docker `yaml:"docker"`
 	Static string `yaml:"static"`
 	Data   string `yaml:"data"`
 
@@ -46,6 +54,12 @@ type Spec struct {
 	// The file is never overwritten afterwards, so edits survive.
 	Env map[string]string `yaml:"env"`
 }
+
+// Runtime values. The zero value is treated as RuntimeBinary.
+const (
+	RuntimeBinary = "binary"
+	RuntimeDocker = "docker"
+)
 
 // Build describes how the binary is produced.
 type Build struct {
@@ -59,6 +73,30 @@ type Build struct {
 	Prebuild string `yaml:"prebuild"`
 	// Tags are extra Go build tags.
 	Tags string `yaml:"tags"`
+}
+
+// Docker describes how a container app is built and run.
+//
+// The build happens on the host, so an image never has to be pushed to a
+// registry: the synced source is the build context and the Dockerfile owns the
+// toolchain, which is also why cgo is no longer a reason to refuse to
+// cross-compile.
+type Docker struct {
+	// Context is the build context, relative to the application root.
+	Context string `yaml:"context"`
+	// File is the Dockerfile, relative to Context.
+	File string `yaml:"file"`
+	// ContainerPort is the port the process listens on inside the container.
+	// Docker publishes the loopback Port above to it.
+	ContainerPort int `yaml:"container_port"`
+	// Target selects a stage in a multi-stage Dockerfile.
+	Target string `yaml:"target"`
+	// BuildArgs are passed through as --build-arg.
+	BuildArgs map[string]string `yaml:"build_args"`
+	// Volumes are bind mounts as "<host-subdir>:<absolute-container-path>",
+	// where the host subdirectory is relative to the app's directory on the
+	// host. It is created if missing.
+	Volumes []string `yaml:"volumes"`
 }
 
 // Discover finds app specs one level under each root: "<root>/<project>/deploy/app.yaml".
@@ -156,10 +194,6 @@ func (s *Spec) validate() error {
 		return errors.New("domain is required")
 	case s.Port < 1 || s.Port > 65535:
 		return fmt.Errorf("port %d must be between 1 and 65535", s.Port)
-	case s.Build.Package == "":
-		return errors.New("build.package is required, e.g. ./cmd/server")
-	case s.Build.Binary == "":
-		return errors.New("build.binary is required, e.g. server")
 	}
 
 	if s.Health == "" {
@@ -167,6 +201,47 @@ func (s *Spec) validate() error {
 	}
 	if !strings.HasPrefix(s.Health, "/") {
 		return fmt.Errorf("health %q must start with /", s.Health)
+	}
+
+	switch s.TLS {
+	case "", "internal":
+	default:
+		return fmt.Errorf("tls %q must be empty or \"internal\"", s.TLS)
+	}
+
+	switch s.Runtime {
+	case "", RuntimeBinary:
+		s.Runtime = RuntimeBinary
+		if s.Build.Package == "" {
+			return errors.New("build.package is required, e.g. ./cmd/server")
+		}
+		if s.Build.Binary == "" {
+			return errors.New("build.binary is required, e.g. server")
+		}
+	case RuntimeDocker:
+		if s.Docker.Context == "" {
+			s.Docker.Context = "."
+		}
+		if s.Docker.File == "" {
+			s.Docker.File = "Dockerfile"
+		}
+		if s.Docker.ContainerPort < 1 || s.Docker.ContainerPort > 65535 {
+			return fmt.Errorf("docker.container_port %d must be between 1 and 65535", s.Docker.ContainerPort)
+		}
+		for i, v := range s.Docker.Volumes {
+			hostPath, containerPath, ok := strings.Cut(v, ":")
+			if !ok || strings.TrimSpace(hostPath) == "" || strings.TrimSpace(containerPath) == "" {
+				return fmt.Errorf("docker.volumes[%d] %q must be <host-subdir>:<container-path>", i, v)
+			}
+			if filepath.IsAbs(hostPath) || strings.Contains(hostPath, "..") {
+				return fmt.Errorf("docker.volumes[%d] host path %q must be a subdirectory of the app", i, hostPath)
+			}
+			if !strings.HasPrefix(containerPath, "/") {
+				return fmt.Errorf("docker.volumes[%d] container path %q must be absolute", i, containerPath)
+			}
+		}
+	default:
+		return fmt.Errorf("runtime %q must be %q or %q", s.Runtime, RuntimeBinary, RuntimeDocker)
 	}
 	return nil
 }
@@ -190,6 +265,16 @@ func (s *Spec) RemoteDir(remoteRoot string) string {
 // ServiceName is the systemd unit name.
 func (s *Spec) ServiceName() string { return s.Name }
 
+// IsDocker reports whether the app is packaged as a container.
+func (s *Spec) IsDocker() bool { return s.Runtime == RuntimeDocker }
+
+// DockerImage is the local tag the image is built and run as. It is never
+// pushed anywhere: the build happens on the host.
+func (s *Spec) DockerImage() string { return s.Name + ":latest" }
+
+// ContainerName is the name of the running container.
+func (s *Spec) ContainerName() string { return s.Name }
+
 // EnvFile renders the initial .env for a first deploy.
 //
 // Values are written with a comment explaining that the file is managed by hand,
@@ -200,10 +285,18 @@ func (s *Spec) EnvFile(baseURL string) string {
 	b.WriteString("# Created by dodeploy on first deploy. This file is never overwritten,\n")
 	b.WriteString("# so edits and secrets added here survive redeploys.\n\n")
 
+	// A container must bind its own interface, not its loopback: docker's
+	// published port forwards to the container's address, so a process on the
+	// container's 127.0.0.1 would be unreachable from the host.
+	host, port := "127.0.0.1", s.Port
+	if s.IsDocker() {
+		host, port = "0.0.0.0", s.Docker.ContainerPort
+	}
+
 	writeEnv(&b, "APP_ENV", "prod")
 	writeEnv(&b, "APP_BASE_URL", baseURL)
-	writeEnv(&b, "HOST", "127.0.0.1")
-	writeEnv(&b, "PORT", fmt.Sprint(s.Port))
+	writeEnv(&b, "HOST", host)
+	writeEnv(&b, "PORT", fmt.Sprint(port))
 	writeEnv(&b, "LOG_LEVEL", "info")
 	b.WriteString("\n")
 
