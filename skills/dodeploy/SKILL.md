@@ -149,6 +149,13 @@ dodeploy new <name> <domain> [--dir DIR] [--host NAME] [--port N]
 dodeploy sizes  [--host NAME]
 dodeploy resize [--host NAME] [--size SLUG] [--disk] [--snapshot] [--yes]
 
+# DNS records
+#   show: list a domain's records
+#   txt:  add a TXT record, e.g. a domain-verification token
+#         (adds without replacing, so SPF/DKIM on the same name survive)
+dodeploy dns show <domain>
+dodeploy dns txt  <name> <value>
+
 # shell and agent skill
 dodeploy ssh   [--host NAME]
 dodeploy skills install [--global] [--dir DIR] [--force]
@@ -158,6 +165,14 @@ dodeploy skills show
 
 All commands are idempotent. `--recreate` is destructive and prompts for the
 host name before destroying the droplet.
+
+TXT records are added alongside whatever is already on the name rather than
+replacing it, because SPF, DKIM and a verification token commonly share one apex.
+For example:
+
+```bash
+dodeploy dns txt example.com "google-site-verification=..."
+```
 
 ## Standard workflows
 
