@@ -21,6 +21,10 @@ type Site struct {
 	Aliases []string
 	// Port is the loopback port the app listens on.
 	Port int
+	// TLSInternal makes Caddy issue a certificate from its own CA instead of
+	// ACME. It is what a name that is not publicly resolvable, such as a .test
+	// name behind a local hosts entry, needs.
+	TLSInternal bool
 }
 
 // Render builds the whole Caddyfile.
@@ -48,10 +52,17 @@ func Render(email string, sites []Site) string {
 			if alias == "" || alias == s.Domain {
 				continue
 			}
-			fmt.Fprintf(&b, "%s {\n\tredir https://%s{uri} permanent\n}\n\n", alias, s.Domain)
+			fmt.Fprintf(&b, "%s {\n", alias)
+			if s.TLSInternal {
+				b.WriteString("\ttls internal\n")
+			}
+			fmt.Fprintf(&b, "\tredir https://%s{uri} permanent\n}\n\n", s.Domain)
 		}
 
 		fmt.Fprintf(&b, "%s {\n", s.Domain)
+		if s.TLSInternal {
+			b.WriteString("\ttls internal\n")
+		}
 		b.WriteString("\tencode zstd gzip\n\n")
 		b.WriteString("\t# The app records the real client rather than the proxy.\n")
 		fmt.Fprintf(&b, "\treverse_proxy 127.0.0.1:%d {\n", s.Port)

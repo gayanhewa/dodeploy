@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -57,18 +58,31 @@ func (h *Host) Deploy(ctx context.Context, spec *appspec.Spec, all []*appspec.Sp
 		return err
 	}
 	if !opts.SkipBuild {
-		if err := h.buildOnHost(ctx, spec, remoteDir); err != nil {
-			return err
+		switch {
+		case spec.IsDocker():
+			if err := h.buildImage(ctx, spec, remoteDir); err != nil {
+				return err
+			}
+		default:
+			if err := h.buildOnHost(ctx, spec, remoteDir); err != nil {
+				return err
+			}
 		}
 	}
-	if err := h.installBinary(ctx, spec, remoteDir); err != nil {
-		return err
-	}
-	if err := h.syncStatic(ctx, spec, remoteDir); err != nil {
-		return err
-	}
-	if err := h.installUnit(ctx, spec, remoteDir); err != nil {
-		return err
+	if spec.IsDocker() {
+		if err := h.installContainer(ctx, spec, remoteDir); err != nil {
+			return err
+		}
+	} else {
+		if err := h.installBinary(ctx, spec, remoteDir); err != nil {
+			return err
+		}
+		if err := h.syncStatic(ctx, spec, remoteDir); err != nil {
+			return err
+		}
+		if err := h.installUnit(ctx, spec, remoteDir); err != nil {
+			return err
+		}
 	}
 	if !opts.SkipProxy {
 		if err := h.applyProxy(ctx, all); err != nil {
@@ -203,6 +217,7 @@ func (h *Host) syncStatic(ctx context.Context, spec *appspec.Spec, remoteDir str
 	return err
 }
 
+// installUnit writes and starts the unit that runs the app's binary.
 func (h *Host) installUnit(ctx context.Context, spec *appspec.Spec, remoteDir string) error {
 	unit := systemd.Render(systemd.Unit{
 		Name:             spec.ServiceName(),
@@ -228,6 +243,105 @@ func (h *Host) installUnit(ctx context.Context, spec *appspec.Spec, remoteDir st
 		spec.ServiceName(), spec.ServiceName())
 	_, err := h.Remote.Run(ctx, cmd)
 	return err
+}
+
+// buildImage builds the app's container image on the host.
+//
+// The build happens where it runs for the same reason a cgo binary is built
+// there: the base image defines the toolchain, so there is nothing to
+// cross-compile. The synced source is the build context, so no image ever has
+// to be pushed to a registry.
+func (h *Host) buildImage(ctx context.Context, spec *appspec.Spec, remoteDir string) error {
+	if !h.Remote.RunTolerant(ctx, "sudo docker info >/dev/null 2>&1") {
+		return fmt.Errorf("cannot reach the docker daemon on %s; a container app needs docker installed and running", h.Name)
+	}
+
+	contextDir := filepath.Join(remoteDir, "src", spec.Docker.Context)
+	dockerfile := filepath.Join(contextDir, spec.Docker.File)
+
+	args := []string{
+		"sudo", "docker", "build",
+		"--file", quote(dockerfile),
+		"--tag", quote(spec.DockerImage()),
+		"--progress", "plain",
+	}
+	for _, k := range sortedKeys(spec.Docker.BuildArgs) {
+		args = append(args, "--build-arg", quote(k+"="+spec.Docker.BuildArgs[k]))
+	}
+	if spec.Docker.Target != "" {
+		args = append(args, "--target", quote(spec.Docker.Target))
+	}
+	args = append(args, quote(contextDir))
+
+	h.Logf("building image %s", spec.DockerImage())
+	out, err := h.Remote.Run(ctx, strings.Join(args, " "))
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(out) != "" {
+		fmt.Fprintln(h.Out, out)
+	}
+	return nil
+}
+
+// installContainer writes and starts the unit that runs the app's container.
+//
+// systemd remains the supervisor, so status, logs and restart behaviour are the
+// same as for a binary app. The container is run in the foreground: systemd
+// then tracks it directly, and the container's output reaches journald, which
+// is what `dodeploy logs` reads.
+func (h *Host) installContainer(ctx context.Context, spec *appspec.Spec, remoteDir string) error {
+	unit := systemd.Render(systemd.Unit{
+		Name: spec.ServiceName(),
+		Docker: &systemd.DockerRun{
+			Image:   spec.DockerImage(),
+			Name:    spec.ContainerName(),
+			Publish: fmt.Sprintf("127.0.0.1:%d:%d", spec.Port, spec.Docker.ContainerPort),
+			EnvFile: remoteDir + "/.env",
+			// The .env may predate the app becoming a container, so the two
+			// values a container cannot take from the file are set explicitly.
+			Env: []string{
+				"HOST=0.0.0.0",
+				fmt.Sprintf("PORT=%d", spec.Docker.ContainerPort),
+			},
+			Volumes: h.containerVolumes(spec, remoteDir),
+		},
+	})
+
+	unitPath := "/etc/systemd/system/" + spec.ServiceName() + ".service"
+	if err := h.Remote.WriteFile(ctx, unitPath, unit, 0o644, "root:root"); err != nil {
+		return err
+	}
+
+	cmd := fmt.Sprintf("sudo systemctl daemon-reload && sudo systemctl enable %s >/dev/null 2>&1; sudo systemctl restart %s",
+		spec.ServiceName(), spec.ServiceName())
+	_, err := h.Remote.Run(ctx, cmd)
+	return err
+}
+
+// containerVolumes turns the spec's host-subdir:container-path pairs into bind
+// mounts, anchoring each host path inside the app's directory on the host.
+func (h *Host) containerVolumes(spec *appspec.Spec, remoteDir string) []string {
+	out := make([]string, 0, len(spec.Docker.Volumes))
+	for _, v := range spec.Docker.Volumes {
+		hostPath, containerPath, ok := strings.Cut(v, ":")
+		if !ok {
+			continue // already rejected by spec validation
+		}
+		out = append(out, filepath.Join(remoteDir, hostPath)+":"+containerPath)
+	}
+	return out
+}
+
+// sortedKeys returns a map's keys in a stable order, so a generated command is
+// identical between runs.
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // applyProxy regenerates the shared proxy config from every app on this host.

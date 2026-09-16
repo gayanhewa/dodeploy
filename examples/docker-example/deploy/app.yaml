@@ -1,0 +1,36 @@
+# Deployment spec for docker-example. Read by dodeploy.
+#
+# dodeploy deploy examples/docker-example
+
+name: docker-example
+host: apps-prod
+domain: dodeploy.test
+
+# .test is not publicly resolvable, so ACME cannot issue for it. This makes
+# Caddy use its own CA instead, which is what a name behind a local hosts entry
+# needs. Drop this line once a real domain points at the host.
+tls: internal
+
+# The loopback port Caddy reverse-proxies to. Unchanged from a binary app: the
+# proxy only ever talks to 127.0.0.1, so it does not know or care that a
+# container is behind it.
+port: 3009
+health: /healthz
+
+runtime: docker
+docker:
+  # Build context, relative to the app root. The source is synced to the host
+  # and built there, so no image is ever pushed to a registry.
+  context: .
+  # Dockerfile to build, relative to the context.
+  file: Dockerfile
+  # The port the process listens on inside the container. Distinct from `port`
+  # above: docker publishes host-loopback `port` to this one.
+  container_port: 8080
+
+# Non-secret defaults for the app's .env, written once on first deploy and
+# never overwritten, so secrets added by hand survive redeploys.
+#
+# dodeploy also writes HOST=0.0.0.0 and PORT=8080 for a container rather than
+# the binary defaults of 127.0.0.1 and the host loopback port: a container has
+# to bind its own interface, because docker forwards the published port there.

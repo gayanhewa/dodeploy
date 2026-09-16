@@ -221,6 +221,16 @@ func cmdDeploy(ctx context.Context, args []string) error {
 		return fmt.Errorf("name an app directory, or use --name or --all")
 	}
 
+	// The proxy config is regenerated from every app on the host, so an app
+	// deployed by path has to be in that set even when it lives outside the
+	// configured search paths.
+	allSpecs := specs
+	for _, spec := range selected {
+		if !hasSpec(allSpecs, spec.Name) {
+			allSpecs = append(allSpecs, spec)
+		}
+	}
+
 	for _, spec := range selected {
 		h, err := host.New(cfg, spec.Host, os.Stdout)
 		if err != nil {
@@ -229,7 +239,7 @@ func cmdDeploy(ctx context.Context, args []string) error {
 		if err := h.Resolve(ctx); err != nil {
 			return err
 		}
-		if err := h.Deploy(ctx, spec, specs, host.DeployOptions{
+		if err := h.Deploy(ctx, spec, allSpecs, host.DeployOptions{
 			SkipBuild: *skipBuild,
 			SkipProxy: *skipProxy,
 		}); err != nil {
@@ -237,6 +247,16 @@ func cmdDeploy(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+// hasSpec reports whether a spec with this name is already in the set.
+func hasSpec(specs []*appspec.Spec, name string) bool {
+	for _, s := range specs {
+		if s.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
