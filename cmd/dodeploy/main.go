@@ -187,7 +187,10 @@ func cmdDeploy(ctx context.Context, args []string) error {
 		skipBuild = fs.Bool("skip-build", false, "install the binary already on the host")
 		skipProxy = fs.Bool("skip-proxy", false, "leave the reverse proxy config alone")
 	)
-	fs.Parse(args)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
 
 	cfg, specs, err := load()
 	if err != nil {
@@ -208,8 +211,8 @@ func cmdDeploy(ctx context.Context, args []string) error {
 			return err
 		}
 		selected = []*appspec.Spec{spec}
-	case fs.NArg() > 0:
-		spec, err := appspec.Load(fs.Arg(0))
+	case len(positional) > 0:
+		spec, err := appspec.Load(positional[0])
 		if err != nil {
 			return err
 		}
@@ -536,12 +539,14 @@ func cmdNew(args []string) error {
 		pkg      = fs.String("package", "", "Go package to build (defaults to ./cmd/<name>)")
 		binary   = fs.String("binary", "", "binary name (defaults to the app name)")
 	)
-	fs.Parse(args)
-
-	if fs.NArg() < 2 {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) < 2 {
 		return fmt.Errorf("usage: dodeploy new <name> <domain> [--dir DIR]")
 	}
-	name, domain := fs.Arg(0), fs.Arg(1)
+	name, domain := positional[0], positional[1]
 
 	if *pkg == "" {
 		*pkg = "./cmd/" + name
@@ -662,9 +667,11 @@ func cmdLogs(ctx context.Context, args []string) error {
 	hostName := fs.String("host", "", "host the app runs on")
 	lines := fs.Int("lines", 100, "how many lines to show")
 	follow := fs.Bool("follow", true, "follow the log")
-	fs.Parse(args)
-
-	if fs.NArg() < 1 {
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+	if len(positional) < 1 {
 		return fmt.Errorf("usage: dodeploy logs <app-name>")
 	}
 
@@ -672,7 +679,7 @@ func cmdLogs(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	spec, err := appspec.Find(specs, fs.Arg(0))
+	spec, err := appspec.Find(specs, positional[0])
 	if err != nil {
 		return err
 	}
@@ -797,6 +804,47 @@ func cmdSkillsShow() error {
 }
 
 // ---------------------------------------------------------------------------
+
+// parseInterspersed parses a command's arguments so flags may appear before or
+// after the positional ones.
+//
+// Go's flag package stops at the first non-flag argument, so "deploy . --skip-build"
+// would silently ignore --skip-build and rebuild anyway. Silently ignoring a flag
+// is the worst failure mode for a CLI, so the arguments are reordered first.
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var flags, positional []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		if len(arg) < 2 || arg[0] != '-' {
+			positional = append(positional, arg)
+			continue
+		}
+		flags = append(flags, arg)
+
+		// --name=value carries its own value.
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		// A flag that takes a value needs the next argument too, unless it is a
+		// boolean, which never does.
+		if f := fs.Lookup(strings.TrimLeft(arg, "-")); f != nil {
+			if bf, ok := f.Value.(interface{ IsBoolFlag() bool }); ok && bf.IsBoolFlag() {
+				continue
+			}
+			if i+1 < len(args) {
+				flags = append(flags, args[i+1])
+				i++
+			}
+		}
+	}
+
+	if err := fs.Parse(flags); err != nil {
+		return nil, err
+	}
+	return positional, nil
+}
 
 // load reads the configuration and discovers apps in the configured paths.
 func load() (*config.Config, []*appspec.Spec, error) {
