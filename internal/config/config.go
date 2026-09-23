@@ -31,6 +31,7 @@ type Config struct {
 type Providers struct {
 	DigitalOcean DigitalOcean `yaml:"digitalocean"`
 	Porkbun      Porkbun      `yaml:"porkbun"`
+	Cloudflare   Cloudflare   `yaml:"cloudflare"`
 }
 
 // DigitalOcean credentials. Token may be left empty, in which case it is read
@@ -44,6 +45,13 @@ type DigitalOcean struct {
 type Porkbun struct {
 	APIKey    string `yaml:"api_key"`
 	SecretKey string `yaml:"secret_key"`
+}
+
+// Cloudflare credentials. The token needs Account -> Turnstile -> Edit; the
+// account id is the one shown on the Turnstile page in the dashboard.
+type Cloudflare struct {
+	APIToken  string `yaml:"api_token"`
+	AccountID string `yaml:"account_id"`
 }
 
 // Host is a machine that apps are deployed to.
@@ -215,4 +223,25 @@ func (c *Config) PorkbunCreds() (apiKey, secret string, err error) {
 			"config, or export PORKBUN_API_KEY and PORKBUN_SECRET_KEY")
 	}
 	return apiKey, secret, nil
+}
+
+// CloudflareCreds resolves Cloudflare API credentials from configuration or
+// environment.
+//
+// It is only consulted by commands that actually talk to Cloudflare, so an app
+// that does not opt in never needs the credential to exist.
+func (c *Config) CloudflareCreds() (apiToken, accountID string, err error) {
+	apiToken = strings.TrimSpace(c.Providers.Cloudflare.APIToken)
+	accountID = strings.TrimSpace(c.Providers.Cloudflare.AccountID)
+	if apiToken == "" {
+		apiToken = strings.TrimSpace(os.Getenv("CLOUDFLARE_API_TOKEN"))
+	}
+	if accountID == "" {
+		accountID = strings.TrimSpace(os.Getenv("CLOUDFLARE_ACCOUNT_ID"))
+	}
+	if apiToken == "" || accountID == "" {
+		return "", "", errors.New("no Cloudflare credentials: set providers.cloudflare " +
+			"in the config, or export CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID")
+	}
+	return apiToken, accountID, nil
 }

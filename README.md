@@ -40,6 +40,9 @@ providers:
   porkbun:
     api_key: ""
     secret_key: ""
+  cloudflare:            # only needed for apps that opt into Turnstile
+    api_token: ""        # empty: falls back to $CLOUDFLARE_API_TOKEN
+    account_id: ""       # empty: falls back to $CLOUDFLARE_ACCOUNT_ID
 
 # Scanned one level deep for <path>/<project>/deploy/app.yaml
 app_paths:
@@ -80,10 +83,41 @@ data: data
 
 env:                     # non-secret defaults, written once
   LOG_LEVEL: info
+
+cloudflare:              # optional; omit and dodeploy never calls Cloudflare
+  turnstile:
+    mode: managed        # managed (default), non-interactive, or invisible
+    widget: ""           # name a shared widget to reuse it across apps
+    domains: [localhost] # extra hostnames beyond domain + aliases
 ```
 
 The spec lives with the app rather than in a central registry, so nothing has to
 be kept in step.
+
+### Cloudflare (Turnstile)
+
+Cloudflare is opt-in per app: add a `cloudflare.turnstile` block and dodeploy can
+keep a Turnstile widget in step with the app, then write the key pair into its
+`.env`. Apps without the block are never touched, and the credential is only
+asked for when a command actually needs it.
+
+```bash
+dodeploy cloudflare turnstile my-app          # reconcile the widget and keys
+dodeploy cloudflare turnstile --all           # every app that opts in
+dodeploy cloudflare turnstile my-app --check  # report drift, change nothing
+dodeploy cloudflare widgets                   # list widgets in the account
+```
+
+The widget is named after the app unless `widget:` names another, so several apps
+can share one. Domains are additive by default, so reconciling one app never
+drops a hostname another relies on; `--prune` makes the set exact.
+`--rotate-secret` issues a fresh secret.
+
+The site key and secret are written to `TURNSTILE_SITE_KEY` and
+`TURNSTILE_SECRET_KEY` unless `env:` renames them. Only those lines are changed:
+the `.env` is otherwise left exactly as it is, and the service restarts only when
+a value actually moved. Deploy the app once first, so the `.env` exists.
+`--check` exits **2** when anything is out of date, so it can gate a deploy.
 
 ## Monitoring
 
@@ -119,6 +153,7 @@ dodeploy deploy --all                                     # everything found
 dodeploy status                                           # hosts and health
 dodeploy health --watch 5s                                # cpu, memory, disk, apps
 dodeploy logs my-app                                      # follow the journal
+dodeploy cloudflare turnstile my-app                      # Turnstile widget + keys
 dodeploy ssh                                              # shell on the host
 dodeploy skills install --global                          # teach your AI agent
 ```

@@ -65,6 +65,9 @@ providers:
   porkbun:
     api_key: ""          # empty: falls back to $PORKBUN_API_KEY
     secret_key: ""       # empty: falls back to $PORKBUN_SECRET_KEY
+  cloudflare:            # only needed for apps that opt into Turnstile
+    api_token: ""        # empty: falls back to $CLOUDFLARE_API_TOKEN
+    account_id: ""       # empty: falls back to $CLOUDFLARE_ACCOUNT_ID
 
 # Scanned one level deep for <path>/<project>/deploy/app.yaml
 app_paths:
@@ -114,6 +117,15 @@ data: data
 
 env:                     # non-secret defaults, written on first deploy only
   LOG_LEVEL: info
+
+cloudflare:              # optional; omit and dodeploy never calls Cloudflare
+  turnstile:
+    mode: managed        # managed (default), non-interactive, or invisible
+    widget: ""           # name a shared widget to reuse it across apps
+    domains: [localhost] # extra hostnames beyond domain + aliases
+    env:                 # names the key pair is written to
+      site_key: TURNSTILE_SITE_KEY
+      secret_key: TURNSTILE_SECRET_KEY
 ```
 
 Rules the loader enforces:
@@ -155,6 +167,15 @@ dodeploy resize [--host NAME] [--size SLUG] [--disk] [--snapshot] [--yes]
 #         (adds without replacing, so SPF/DKIM on the same name survive)
 dodeploy dns show <domain>
 dodeploy dns txt  <name> <value>
+
+# Cloudflare (opt-in per app; apps without a cloudflare.turnstile block are
+# never touched, and credentials are only needed by these commands)
+#   reconcile the widget named after the app, then write its key pair to .env
+#   --check exits 2 when anything is out of date, so it can gate a deploy
+#   --prune makes the domain set exact; --rotate-secret issues a fresh secret
+#   widgets lists every widget in the account (never their secrets)
+dodeploy cloudflare turnstile <app> | --all  [--check] [--rotate-secret] [--prune]
+dodeploy cloudflare widgets
 
 # shell and agent skill
 dodeploy ssh   [--host NAME]
@@ -206,6 +227,23 @@ needs no host changes at all:
 dodeploy new second-app second-app.com --dir ~/Workspace/second-app
 dodeploy deploy ~/Workspace/second-app
 ```
+
+### Configure Turnstile for an app
+
+Add a `cloudflare.turnstile` block to the app's spec, deploy it once so its
+`.env` exists, then reconcile:
+
+```bash
+dodeploy deploy ~/Workspace/my-app
+dodeploy cloudflare turnstile my-app
+```
+
+The command treats the widget as declarative: it creates one named after the app
+if it is missing, adds the app's domain and aliases, and writes
+`TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` into the app's `.env`, changing only
+those lines and restarting only when a value moved. Several apps share one widget
+by naming the same `widget:`. Re-running is a no-op; `--check` reports drift
+without writing and exits 2, so it can gate CI.
 
 ### Monitor a host
 
@@ -272,6 +310,9 @@ deleted. The droplet is powered off during the resize.
 | `no DigitalOcean token` | Set `providers.digitalocean.token`, export `$DIGITALOCEAN_TOKEN`, or run `doctl auth init`. |
 | `no Porkbun credentials` | Set `providers.porkbun`, export `$PORKBUN_API_KEY`/`$PORKBUN_SECRET_KEY`, or pass `--no-dns`. |
 | Config edits ignored | `$DODEPLOY_CONFIG` points somewhere other than `~/.config/dodeploy/config.yaml`. |
+| `no Cloudflare credentials` | Set `providers.cloudflare` in the config, or export `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. |
+| Cloudflare 403 | The token needs **Account → Turnstile → Edit**; create a scoped token rather than using a Global API Key. |
+| `... does not exist yet` from `cloudflare turnstile` | Deploy the app once first: the key pair is written into its `.env`, which only exists after a deploy. |
 
 ## Gotchas
 
