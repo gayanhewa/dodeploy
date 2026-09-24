@@ -6,6 +6,9 @@ One host runs one Caddy reverse proxy on ports 80 and 443. Each app is a systemd
 service on a loopback port, so **adding an app is a configuration change, never a
 firewall change**.
 
+An app is either a **compiled binary** (the default) or a **container**. Caddy
+only ever talks to `127.0.0.1:<port>`, so it does not know or care which:
+
 ```
                      ┌──────────────────────────────────────────┐
    :80 :443  ───────▶│  Caddy  (TLS, HTTP→HTTPS, alias→apex)    │
@@ -14,8 +17,8 @@ firewall change**.
                   127.0.0.1:3001     127.0.0.1:3002      … 3001-3099 reserved
                              │               │
                      ┌───────▼──────┐ ┌──────▼───────┐
-                     │ app: one     │ │ app: two     │   each a systemd unit
-                     │ user: apps   │ │ user: apps   │
+                     │ app: binary  │ │ app: docker  │  each a systemd unit
+                     │ user: apps   │ │ container    │
                      └──────────────┘ └──────────────┘
 ```
 
@@ -60,7 +63,17 @@ hosts:
 ## Per-app spec
 
 Each application declares how it is built and served, in its own repository, at
-`deploy/app.yaml`:
+`deploy/app.yaml`. The spec lives with the app rather than in a central registry,
+so nothing has to be kept in step.
+
+The top half is the same everywhere. `runtime` then says how the app is packaged:
+
+| `runtime` | Built with | Runs as |
+|---|---|---|
+| *(empty)* or `binary` | `go build` on the host | a systemd unit, as user `apps` |
+| `docker` | `docker build` on the host | a container, supervised by a systemd unit |
+
+### Binary app (the default)
 
 ```yaml
 name: my-app
@@ -82,8 +95,60 @@ env:                     # non-secret defaults, written once
   LOG_LEVEL: info
 ```
 
-The spec lives with the app rather than in a central registry, so nothing has to
-be kept in step.
+### Container app
+
+`runtime: docker` builds the synced source on the host and runs the image as a
+container. Nothing is pushed to a registry: the Dockerfile owns the toolchain, so
+the build happens where it runs. A container app has no `build:` block; instead
+`docker.container_port` says which port the process listens on inside the
+container, while `port` stays the host's loopback port. A host created by
+`dodeploy provision` already has docker installed.
+
+```yaml
+name: my-app
+host: apps-prod
+domain: my-app.com
+port: 3001               # loopback, unique per host
+health: /healthz
+
+runtime: docker
+docker:
+  context: .             # build context, relative to the app root
+  file: Dockerfile       # Dockerfile, relative to the context
+  container_port: 8080   # what the process listens on inside the container
+  # target: build        # optional multi-stage target
+  # build_args:          # optional --build-arg, e.g. values baked into a bundle
+  #   NEXT_PUBLIC_APP_URL: https://my-app.com
+  # volumes:             # optional bind mounts, <host-subdir>:<container-path>
+  #   - data:/data
+
+env:                     # non-secret defaults, written once
+  LOG_LEVEL: info
+```
+
+Two things a container app has to get right, and dodeploy handles both:
+
+- It publishes on the host's **loopback** port, never `0.0.0.0`. Docker writes
+  its own iptables rules, so a public bind would bypass the firewall; dodeploy
+  always renders `127.0.0.1:<port>:<container_port>`.
+- Its process listens on `0.0.0.0` **inside** the container, because the
+  published port forwards to the container's interface rather than its loopback.
+  For this reason dodeploy writes `HOST=0.0.0.0` and `PORT=<container_port>`
+  into a container app's `.env` instead of the binary defaults.
+
+A working container app lives in
+[`examples/docker-example`](examples/docker-example).
+
+### TLS
+
+Caddy obtains a certificate with ACME, which needs a publicly resolvable name.
+For one that cannot have it - `localhost`, or a `*.test` name behind a local
+hosts entry - set `tls: internal` and Caddy signs it with its own CA instead:
+
+```yaml
+domain: my-app.test
+tls: internal
+```
 
 ## Monitoring
 
