@@ -11,6 +11,12 @@ providers:
     # Leave empty to use $PORKBUN_API_KEY and $PORKBUN_SECRET_KEY.
     api_key: ""
     secret_key: ""
+  cloudflare:
+    # Only needed for apps that opt into a Turnstile widget. Leave empty to use
+    # $CLOUDFLARE_API_TOKEN and $CLOUDFLARE_ACCOUNT_ID. The token needs
+    # Account -> Turnstile -> Edit.
+    api_token: ""
+    account_id: ""
 
 # Directories scanned for applications, one level deep:
 #   <path>/<project>/deploy/app.yaml

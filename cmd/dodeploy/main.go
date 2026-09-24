@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/gayanhewa/dodeploy/internal/appspec"
+	"github.com/gayanhewa/dodeploy/internal/cloudflare"
 	"github.com/gayanhewa/dodeploy/internal/config"
 	"github.com/gayanhewa/dodeploy/internal/dns"
 	"github.com/gayanhewa/dodeploy/internal/host"
@@ -67,6 +68,8 @@ func main() {
 		err = cmdResize(ctx, args)
 	case "dns":
 		err = cmdDNS(ctx, args)
+	case "cloudflare":
+		err = cmdCloudflare(ctx, args)
 	case "apps":
 		err = cmdApps(args)
 	case "new":
@@ -88,13 +91,20 @@ func main() {
 	}
 
 	if err != nil {
-		// Degraded is a result, not a failure: the report has already been
-		// printed, so exit 2 lets a monitor alert without parsing it.
-		if errors.Is(err, host.ErrDegraded) {
+		switch {
+		case errors.Is(err, host.ErrDegraded):
+			// Degraded is a result, not a failure: the report has already been
+			// printed, so exit 2 lets a monitor alert without parsing it.
 			os.Exit(2)
+		case errors.Is(err, cloudflare.ErrDrift):
+			// Same contract for a check: the diff was printed, and exit 2 gates
+			// a deploy without being mistaken for a crash.
+			fmt.Fprintln(os.Stderr, "\ncloudflare configuration is out of date")
+			os.Exit(2)
+		default:
+			fmt.Fprintf(os.Stderr, "\nerror: %v\n", err)
+			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "\nerror: %v\n", err)
-		os.Exit(1)
 	}
 }
 
@@ -112,6 +122,7 @@ Commands:
   sizes       List droplet sizes available in a host's region
   resize      Grow a host's droplet (powers it off; a disk resize is permanent)
   dns         Show a domain's records, or add a TXT record
+  cloudflare  Configure Cloudflare for an app (opt-in), currently Turnstile
   apps        List apps found in the configured search paths
   new         Write a deploy/app.yaml for a new app
   ssh         Open a shell on a host
@@ -182,10 +193,11 @@ func cmdProvision(ctx context.Context, args []string) error {
 func cmdDeploy(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
 	var (
-		byName    = fs.String("name", "", "deploy an app by name from the search paths")
-		all       = fs.Bool("all", false, "deploy every app in the search paths")
-		skipBuild = fs.Bool("skip-build", false, "install the binary already on the host")
-		skipProxy = fs.Bool("skip-proxy", false, "leave the reverse proxy config alone")
+		byName         = fs.String("name", "", "deploy an app by name from the search paths")
+		all            = fs.Bool("all", false, "deploy every app in the search paths")
+		skipBuild      = fs.Bool("skip-build", false, "install the binary already on the host")
+		skipProxy      = fs.Bool("skip-proxy", false, "leave the reverse proxy config alone")
+		withCloudflare = fs.Bool("cloudflare", false, "reconcile the app's Turnstile widget after deploying")
 	)
 	positional, err := parseInterspersed(fs, args)
 	if err != nil {
@@ -244,6 +256,20 @@ func cmdDeploy(ctx context.Context, args []string) error {
 			SkipProxy: *skipProxy,
 		}); err != nil {
 			return err
+		}
+
+		// Cloudflare is a per-app opt-in, chained here only when asked for, so a
+		// deploy stays provider-agnostic for everyone else.
+		if *withCloudflare {
+			if !spec.TurnstileEnabled() {
+				fmt.Fprintf(os.Stderr, "warning: %s has no cloudflare.turnstile block; skipping Cloudflare\n", spec.Name)
+				continue
+			}
+			report, err := h.ConfigureTurnstile(ctx, spec, host.TurnstileOptions{})
+			if err != nil {
+				return err
+			}
+			printTurnstileReport(spec, report, false)
 		}
 	}
 	return nil
@@ -544,6 +570,185 @@ func cmdDNS(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown dns subcommand %q; use show or txt", args[0])
 	}
+}
+
+// ---------------------------------------------------------------------------
+// cloudflare
+// ---------------------------------------------------------------------------
+
+func cmdCloudflare(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage:\n" +
+			"  dodeploy cloudflare turnstile <app|--all> [--check] [--rotate-secret] [--prune]\n" +
+			"  dodeploy cloudflare widgets")
+	}
+
+	switch args[0] {
+	case "turnstile":
+		return cmdCloudflareTurnstile(ctx, args[1:])
+	case "widgets":
+		return cmdCloudflareWidgets(ctx, args[1:])
+	default:
+		return fmt.Errorf("unknown cloudflare subcommand %q; use turnstile or widgets", args[0])
+	}
+}
+
+// cmdCloudflareTurnstile reconciles an app's widget and writes the key pair to
+// its .env. It is opt-in per app through the spec, so --all only ever touches
+// apps that asked for it.
+func cmdCloudflareTurnstile(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("cloudflare turnstile", flag.ExitOnError)
+	var (
+		byName = fs.String("name", "", "configure this app by name from the search paths")
+		all    = fs.Bool("all", false, "configure every app that opts in")
+		check  = fs.Bool("check", false, "report drift and exit 2 without changing anything")
+		rotate = fs.Bool("rotate-secret", false, "issue a fresh secret and write it to the app")
+		prune  = fs.Bool("prune", false, "make the widget's domains exact instead of additive")
+	)
+	positional, err := parseInterspersed(fs, args)
+	if err != nil {
+		return err
+	}
+
+	cfg, specs, err := load()
+	if err != nil {
+		return err
+	}
+
+	var selected []*appspec.Spec
+	switch {
+	case *all:
+		for _, s := range specs {
+			if s.TurnstileEnabled() {
+				selected = append(selected, s)
+			}
+		}
+		if len(selected) == 0 {
+			return fmt.Errorf("no app opts into Cloudflare; add a cloudflare.turnstile block to deploy/app.yaml")
+		}
+	case *byName != "":
+		spec, err := appspec.Find(specs, *byName)
+		if err != nil {
+			return err
+		}
+		selected = []*appspec.Spec{spec}
+	case len(positional) > 0:
+		spec, err := appspec.Load(positional[0])
+		if err != nil {
+			return err
+		}
+		selected = []*appspec.Spec{spec}
+	default:
+		return fmt.Errorf("name an app directory, or use --name or --all")
+	}
+
+	drifted := false
+	for _, spec := range selected {
+		if !spec.TurnstileEnabled() {
+			return fmt.Errorf("app %q has no cloudflare.turnstile block in its spec; add one to opt in", spec.Name)
+		}
+
+		h, err := host.New(cfg, spec.Host, os.Stdout)
+		if err != nil {
+			return err
+		}
+		if err := h.Resolve(ctx); err != nil {
+			return err
+		}
+
+		report, err := h.ConfigureTurnstile(ctx, spec, host.TurnstileOptions{
+			Check:        *check,
+			RotateSecret: *rotate,
+			Prune:        *prune,
+		})
+		if err != nil && !errors.Is(err, cloudflare.ErrDrift) {
+			return err
+		}
+		printTurnstileReport(spec, report, *check)
+		if errors.Is(err, cloudflare.ErrDrift) {
+			drifted = true
+		}
+	}
+
+	if drifted {
+		return cloudflare.ErrDrift
+	}
+	return nil
+}
+
+// cmdCloudflareWidgets lists the account's widgets, never their secrets.
+func cmdCloudflareWidgets(ctx context.Context, args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	token, account, err := cfg.CloudflareCreds()
+	if err != nil {
+		return err
+	}
+
+	widgets, err := cloudflare.New(token, account).Widgets(ctx)
+	if err != nil {
+		return err
+	}
+	if len(widgets) == 0 {
+		fmt.Println("no Turnstile widgets in this account")
+		return nil
+	}
+
+	fmt.Printf("  %-26s %-28s %-14s %s\n", "NAME", "SITEKEY", "MODE", "DOMAINS")
+	for _, w := range widgets {
+		fmt.Printf("  %-26s %-28s %-14s %s\n",
+			w.Name, w.SiteKey, w.Mode, strings.Join(cloudflare.SortedDomains(w.Domains), ", "))
+	}
+	return nil
+}
+
+// printTurnstileReport renders what a reconcile did, or would do in check mode.
+func printTurnstileReport(spec *appspec.Spec, r host.TurnstileReport, check bool) {
+	fmt.Printf("==> cloudflare turnstile %s\n", spec.Name)
+
+	w := r.Widget.Widget
+	switch {
+	case r.Widget.Created:
+		fmt.Printf("    widget     %s %q (%s)\n", tense(check, "create", "created"), w.Name, w.Mode)
+	case r.Widget.Updated:
+		fmt.Printf("    widget     %s %q (%s)\n", tense(check, "update", "updated"), w.Name, w.Mode)
+	default:
+		fmt.Printf("    widget     %s (%s, %s)\n", w.Name, w.SiteKey, w.Mode)
+	}
+	if len(w.Domains) > 0 {
+		fmt.Printf("    domains    %s\n", strings.Join(cloudflare.SortedDomains(w.Domains), ", "))
+	}
+	if w.SiteKey != "" {
+		fmt.Printf("    site key   %s\n", w.SiteKey)
+	}
+
+	siteKeyName, secretKeyName := spec.TurnstileEnvNames()
+	switch {
+	case r.EnvPath == "":
+		// A widget still to be created has no key pair to compare.
+	case r.EnvChanged:
+		fmt.Printf("    env        %s %s and %s in %s\n",
+			tense(check, "would set", "set"), siteKeyName, secretKeyName, r.EnvPath)
+	default:
+		fmt.Printf("    env        %s already current\n", r.EnvPath)
+	}
+
+	if r.Restarted {
+		fmt.Printf("    restarted  %s\n", spec.ServiceName())
+	}
+	if w.Mode == appspec.TurnstileModeInvisible {
+		fmt.Println("    note       invisible mode requires Cloudflare's Turnstile privacy addendum in the site's privacy policy")
+	}
+}
+
+// tense picks the verb for a change that has happened or is only proposed.
+func tense(check bool, provisional, past string) string {
+	if check {
+		return provisional
+	}
+	return past
 }
 
 // ---------------------------------------------------------------------------

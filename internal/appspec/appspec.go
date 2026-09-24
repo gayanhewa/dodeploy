@@ -50,10 +50,57 @@ type Spec struct {
 	Static string `yaml:"static"`
 	Data   string `yaml:"data"`
 
+	// Cloudflare holds the opt-in Cloudflare integrations. When it is empty,
+	// dodeploy never contacts Cloudflare for this app.
+	Cloudflare Cloudflare `yaml:"cloudflare"`
+
 	// Env holds non-secret defaults written into the app's .env on first deploy.
 	// The file is never overwritten afterwards, so edits survive.
 	Env map[string]string `yaml:"env"`
 }
+
+// Cloudflare is the optional Cloudflare configuration for an app.
+type Cloudflare struct {
+	Turnstile *Turnstile `yaml:"turnstile"`
+}
+
+// Turnstile describes a Turnstile widget guarding an app's forms.
+//
+// The block's presence is the opt-in. The site key and secret are never read
+// from the spec, because deploy/app.yaml is committed: dodeploy writes them to
+// the app's .env instead.
+type Turnstile struct {
+	// Mode is the widget mode: managed (default), non-interactive or invisible.
+	Mode string `yaml:"mode"`
+	// Widget names the widget to reconcile. Empty uses the app's name. Put the
+	// same name in several specs to share one widget across apps.
+	Widget string `yaml:"widget"`
+	// Domains are extra hostnames beyond the app's domain and aliases, such as
+	// localhost during development.
+	Domains []string `yaml:"domains"`
+	// Env names the variables the key pair is written to.
+	Env TurnstileEnv `yaml:"env"`
+}
+
+// TurnstileEnv names the environment variables the Turnstile key pair is
+// written to. Both default to the conventional names.
+type TurnstileEnv struct {
+	SiteKey   string `yaml:"site_key"`
+	SecretKey string `yaml:"secret_key"`
+}
+
+// Turnstile widget modes, mirroring the values the Cloudflare API accepts.
+const (
+	TurnstileModeManaged        = "managed"
+	TurnstileModeNonInteractive = "non-interactive"
+	TurnstileModeInvisible      = "invisible"
+)
+
+// Default environment variable names for the Turnstile key pair.
+const (
+	DefaultTurnstileSiteKeyEnv   = "TURNSTILE_SITE_KEY"
+	DefaultTurnstileSecretKeyEnv = "TURNSTILE_SECRET_KEY"
+)
 
 // Runtime values. The zero value is treated as RuntimeBinary.
 const (
@@ -243,6 +290,21 @@ func (s *Spec) validate() error {
 	default:
 		return fmt.Errorf("runtime %q must be %q or %q", s.Runtime, RuntimeBinary, RuntimeDocker)
 	}
+
+	if t := s.Cloudflare.Turnstile; t != nil {
+		switch t.Mode {
+		case "", TurnstileModeManaged, TurnstileModeNonInteractive, TurnstileModeInvisible:
+		default:
+			return fmt.Errorf("cloudflare.turnstile.mode %q must be %q, %q or %q",
+				t.Mode, TurnstileModeManaged, TurnstileModeNonInteractive, TurnstileModeInvisible)
+		}
+		if t.Env.SiteKey == "" {
+			t.Env.SiteKey = DefaultTurnstileSiteKeyEnv
+		}
+		if t.Env.SecretKey == "" {
+			t.Env.SecretKey = DefaultTurnstileSecretKeyEnv
+		}
+	}
 	return nil
 }
 
@@ -253,6 +315,63 @@ func (s *Spec) Domains() []string {
 		if a != "" && a != s.Domain {
 			out = append(out, a)
 		}
+	}
+	return out
+}
+
+// TurnstileEnabled reports whether the app opted into a Turnstile widget.
+func (s *Spec) TurnstileEnabled() bool { return s.Cloudflare.Turnstile != nil }
+
+// TurnstileWidgetName is the widget the app reconciles. It defaults to the
+// app's name, and a spec may name another to share one widget across apps.
+func (s *Spec) TurnstileWidgetName() string {
+	if s.Cloudflare.Turnstile == nil {
+		return ""
+	}
+	if name := strings.TrimSpace(s.Cloudflare.Turnstile.Widget); name != "" {
+		return name
+	}
+	return s.Name
+}
+
+// TurnstileMode is the configured widget mode, or "" when the spec does not
+// set one.
+//
+// Empty means "leave an existing widget's mode alone, and use managed for a new
+// one". Defaulting here instead would let one app silently change the mode of a
+// widget that several apps share.
+func (s *Spec) TurnstileMode() string {
+	if s.Cloudflare.Turnstile == nil {
+		return ""
+	}
+	return s.Cloudflare.Turnstile.Mode
+}
+
+// TurnstileEnvNames are the variables the key pair is written to.
+func (s *Spec) TurnstileEnvNames() (siteKey, secretKey string) {
+	if s.Cloudflare.Turnstile == nil {
+		return DefaultTurnstileSiteKeyEnv, DefaultTurnstileSecretKeyEnv
+	}
+	return s.Cloudflare.Turnstile.Env.SiteKey, s.Cloudflare.Turnstile.Env.SecretKey
+}
+
+// TurnstileDomains is the app's own hostnames followed by any extra ones the
+// spec adds, lower-cased and de-duplicated.
+func (s *Spec) TurnstileDomains() []string {
+	candidates := s.Domains()
+	if s.Cloudflare.Turnstile != nil {
+		candidates = append(candidates, s.Cloudflare.Turnstile.Domains...)
+	}
+
+	seen := make(map[string]bool, len(candidates))
+	out := make([]string, 0, len(candidates))
+	for _, d := range candidates {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
 	}
 	return out
 }
