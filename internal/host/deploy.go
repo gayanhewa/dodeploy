@@ -142,22 +142,43 @@ func (h *Host) syncSource(ctx context.Context, spec *appspec.Spec, remoteDir str
 		".git", "node_modules", "bin", "data", ".env",
 		"*.db", "*.db-wal", "*.db-shm",
 	}
+	if spec.EnvFile != "" {
+		// The production env file is uploaded separately, as the app's .env. It
+		// must not also land in the source tree, where it may be served or read.
+		excludes = append(excludes, filepath.ToSlash(spec.EnvFile))
+	}
 	return h.Remote.Sync(ctx, spec.Root, remoteDir+"/src/", excludes)
 }
 
-// ensureEnvFile writes the app's environment once, and never again.
+// ensureEnvFile writes the app's environment.
 //
-// Secrets are added here by hand after the first deploy, so overwriting the file
-// on every deploy would silently destroy them.
+// With neither env_file nor env_production set, the file is written once and
+// never again: secrets are added by hand after the first deploy, so overwriting
+// it would silently destroy them. A configured production environment is
+// authoritative instead, and replaces the file on every deploy.
 func (h *Host) ensureEnvFile(ctx context.Context, spec *appspec.Spec, remoteDir string) error {
 	path := remoteDir + "/.env"
-	if h.Remote.RunTolerant(ctx, "test -f "+quote(path)) {
+
+	if spec.EnvFile != "" {
+		content, err := os.ReadFile(filepath.Join(spec.Root, spec.EnvFile))
+		if err != nil {
+			return fmt.Errorf("read env_file %s: %w", spec.EnvFile, err)
+		}
+		h.Logf("writing .env from %s (replaces the host file)", spec.EnvFile)
+		return h.Remote.WriteFile(ctx, path, string(content), 0o640, "root:"+ServiceUser)
+	}
+
+	if !spec.ManagedEnv() && h.Remote.RunTolerant(ctx, "test -f "+quote(path)) {
 		return nil
 	}
 
-	h.Logf("creating .env (edit it to add secrets; it is never overwritten)")
+	if spec.ManagedEnv() {
+		h.Logf("writing .env from env_production (replaces the host file)")
+	} else {
+		h.Logf("creating .env (edit it to add secrets; it is never overwritten)")
+	}
 	base := "https://" + spec.Domain
-	if err := h.Remote.WriteFile(ctx, path, spec.EnvFile(base), 0o640, "root:"+ServiceUser); err != nil {
+	if err := h.Remote.WriteFile(ctx, path, spec.RenderEnv(base), 0o640, "root:"+ServiceUser); err != nil {
 		return err
 	}
 	return nil
