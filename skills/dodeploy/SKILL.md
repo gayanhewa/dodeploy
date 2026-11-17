@@ -231,10 +231,10 @@ env_file: .env.production   # relative to the app root; copied verbatim
 ```
 
 Keep `.env.production` out of git if it holds secrets. The file replaces the
-generated `.env` on every deploy, so it must define `HOST` and `PORT` itself
-(`127.0.0.1` and `port` for a binary, `0.0.0.0` and `docker.container_port` for
-a container). For non-secret values, use `env_production:` in the spec instead;
-the two cannot be combined.
+generated `.env` on every deploy. A binary app must therefore define `HOST` and
+`PORT` itself (`127.0.0.1` and `port`); a container app gets both from its unit.
+For non-secret values, use `env_production:` in the spec instead; the two cannot
+be combined.
 
 ### Ship every discovered app
 
