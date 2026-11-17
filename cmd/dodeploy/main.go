@@ -836,6 +836,12 @@ data: data
 # never overwritten, so secrets added there survive redeploys.
 env:
   LOG_LEVEL: info
+
+# A production environment applied on every deploy. Use one or the other:
+#
+# env_file: .env.production       # copied over the host's .env; keep it out of git
+# env_production:                 # always applied; do not put secrets in this spec
+#   LOG_LEVEL: info
 `, name, *dir, name, *hostName, domain, *port, *pkg, *binary)
 
 	if err := os.WriteFile(path, []byte(spec), 0o644); err != nil {

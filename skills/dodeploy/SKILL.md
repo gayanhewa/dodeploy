@@ -33,7 +33,8 @@ is one of the commands below plus an edit to a spec.
   reserved IP.
 - `deploy` skips the proxy reload when the generated Caddy config is unchanged.
 - The app's `.env` on the host is written **once** and never overwritten, so
-  secrets added by hand survive redeploys.
+  secrets added by hand survive redeploys. Set `env_file` or `env_production`
+  in the spec to make it managed and replace it on every deploy instead.
 
 ## Prerequisites
 
@@ -118,6 +119,11 @@ data: data
 env:                     # non-secret defaults, written on first deploy only
   LOG_LEVEL: info
 
+# Production environment applied on every deploy (use one or the other):
+# env_file: .env.production # copied over the host's .env; keep it out of git
+# env_production:           # always applied; do not put secrets in this spec
+#   LOG_LEVEL: info
+
 cloudflare:              # optional; omit and dodeploy never calls Cloudflare
   turnstile:
     mode: managed        # managed (default), non-interactive, or invisible
@@ -134,6 +140,8 @@ Rules the loader enforces:
 - `domain`, `build.package` and `build.binary` are required.
 - `port` must be 1-65535 and unique per host.
 - `health` defaults to `/healthz` and must start with `/`.
+- `env_file` must stay inside the app directory, and cannot be combined with
+  `env_production`.
 
 Write a spec with `dodeploy new` rather than by hand when starting fresh; it
 assigns the next free port and fills in the host.
@@ -212,6 +220,22 @@ dodeploy deploy ~/Workspace/my-app
 dodeploy deploy --name my-app
 ```
 
+### Keep production environment in the repository
+
+By default the host's `.env` is written once, so a new variable has to be added
+there by hand. To make the file part of the deploy instead:
+
+```yaml
+# deploy/app.yaml
+env_file: .env.production   # relative to the app root; copied verbatim
+```
+
+Keep `.env.production` out of git if it holds secrets. The file replaces the
+generated `.env` on every deploy. A binary app must therefore define `HOST` and
+`PORT` itself (`127.0.0.1` and `port`); a container app gets both from its unit.
+For non-secret values, use `env_production:` in the spec instead; the two cannot
+be combined.
+
 ### Ship every discovered app
 
 ```bash
@@ -244,6 +268,10 @@ if it is missing, adds the app's domain and aliases, and writes
 those lines and restarting only when a value moved. Several apps share one widget
 by naming the same `widget:`. Re-running is a no-op; `--check` reports drift
 without writing and exits 2, so it can gate CI.
+
+If the app uses `env_file` or `env_production`, its managed `.env` must contain
+the `TURNSTILE_*` keys: the next deploy replaces the file, including anything
+this command wrote.
 
 ### Monitor a host
 
@@ -319,7 +347,7 @@ deleted. The droplet is powered off during the resize.
 - Ports 3001-3099 are reserved for loopback apps; do not expose them publicly.
 - The `.env` on the host is created only on first deploy. Change `env:` in the
   spec and it will **not** propagate to an existing app; edit the file on the
-  host instead.
+  host, or set `env_file`/`env_production` to manage it on every deploy.
 - `deploy` builds on the host, so the droplet needs enough memory for the build.
   Use `--skip-build` when the binary is already present.
 - App discovery is one level deep. Nested monorepo layouts need each app to have

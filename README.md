@@ -97,6 +97,11 @@ data: data
 env:                     # non-secret defaults, written once
   LOG_LEVEL: info
 
+# Production environment applied on every deploy (use one or the other):
+# env_file: .env.production   # copied over the host's .env; keep it out of git
+# env_production:             # always applied; do not put secrets in this spec
+#   LOG_LEVEL: info
+
 cloudflare:              # optional; omit and dodeploy never calls Cloudflare
   turnstile:
     mode: managed        # managed (default), non-interactive, or invisible
@@ -133,6 +138,11 @@ docker:
 
 env:                     # non-secret defaults, written once
   LOG_LEVEL: info
+
+# Production environment applied on every deploy (use one or the other):
+# env_file: .env.production   # copied over the host's .env; keep it out of git
+# env_production:             # always applied; do not put secrets in this spec
+#   LOG_LEVEL: info
 ```
 
 Two things a container app has to get right, and dodeploy handles both:
@@ -147,6 +157,27 @@ Two things a container app has to get right, and dodeploy handles both:
 
 A working container app lives in
 [`examples/docker-example`](examples/docker-example).
+
+### Environment
+
+By default dodeploy writes the app's `.env` once, on the first deploy, and never
+touches it again: secrets added by hand survive redeploys. To keep the file in
+step with the repository instead, choose one of:
+
+- `env_file` — a local file, relative to the app root, copied over the host's
+  `.env` on every deploy. This is the place for production secrets; keep it out
+  of git.
+- `env_production` — values applied on every deploy. `deploy/app.yaml` is
+  committed, so use this for non-secret configuration only.
+
+`env_file` is copied verbatim. A binary app therefore needs `HOST` and `PORT`
+in it (`127.0.0.1` and `port`); a container app gets both from its unit, which
+overrides the file. `env_production` is merged into the generated file, so those
+runtime values are still written for you. Both are written as `0640 root:apps`.
+
+An app using `cloudflare.turnstile` with a managed environment must carry the
+`TURNSTILE_*` keys in its `env_file` or `env_production`, because a deploy would
+otherwise replace the keys `dodeploy cloudflare turnstile` wrote.
 
 ### TLS
 
@@ -183,6 +214,10 @@ The site key and secret are written to `TURNSTILE_SITE_KEY` and
 the `.env` is otherwise left exactly as it is, and the service restarts only when
 a value actually moved. Deploy the app once first, so the `.env` exists.
 `--check` exits **2** when anything is out of date, so it can gate a deploy.
+
+With a managed environment, add the `TURNSTILE_*` keys to the `env_file` or
+`env_production` source too: the next deploy replaces whatever this command
+wrote into the host's `.env`.
 
 ## Monitoring
 

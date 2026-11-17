@@ -29,6 +29,80 @@ build:
   binary: server
 `
 
+func TestEnvProductionOverridesEnvAndAppliesEveryDeploy(t *testing.T) {
+	spec, err := writeSpec(t, baseSpec+`
+env:
+  LOG_LEVEL: debug
+  SHARED: from-env
+env_production:
+  SHARED: from-production
+  DATABASE_URL: postgres://prod
+`)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !spec.ManagedEnv() {
+		t.Fatal("env_production must make the .env managed")
+	}
+
+	env := spec.RenderEnv("https://my-app.com")
+	for _, want := range []string{
+		"APP_ENV=prod",
+		"APP_BASE_URL=https://my-app.com",
+		"LOG_LEVEL=debug",
+		"SHARED=from-production",
+		"DATABASE_URL=postgres://prod",
+	} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("env content missing %q:\n%s", want, env)
+		}
+	}
+	if strings.Contains(env, "SHARED=from-env") {
+		t.Fatalf("env_production must override env:\n%s", env)
+	}
+}
+
+func TestEnvFileIsManagedAndNormalised(t *testing.T) {
+	spec, err := writeSpec(t, baseSpec+`
+env_file: ./deploy/.env.production
+`)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !spec.ManagedEnv() {
+		t.Fatal("env_file must make the .env managed")
+	}
+	if spec.EnvFile != "deploy/.env.production" {
+		t.Fatalf("env_file = %q, want a cleaned relative path", spec.EnvFile)
+	}
+}
+
+func TestEnvFileMustStayInsideTheApp(t *testing.T) {
+	for _, path := range []string{"/etc/passwd", "../secrets", "deploy/../../secrets"} {
+		_, err := writeSpec(t, baseSpec+"env_file: "+path+"\n")
+		if err == nil {
+			t.Fatalf("env_file %q should have been rejected", path)
+		}
+		if !strings.Contains(err.Error(), "env_file") {
+			t.Fatalf("error %q should name the offending field", err)
+		}
+	}
+}
+
+func TestEnvFileAndEnvProductionCannotBothBeSet(t *testing.T) {
+	_, err := writeSpec(t, baseSpec+`
+env_file: .env.production
+env_production:
+  LOG_LEVEL: info
+`)
+	if err == nil {
+		t.Fatal("expected an error when both env sources are set")
+	}
+	if !strings.Contains(err.Error(), "env_file") || !strings.Contains(err.Error(), "env_production") {
+		t.Fatalf("error %q should name both fields", err)
+	}
+}
+
 func TestTurnstileNotEnabledByDefault(t *testing.T) {
 	spec, err := writeSpec(t, baseSpec)
 	if err != nil {
